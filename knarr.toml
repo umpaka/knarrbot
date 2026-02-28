@@ -1,0 +1,21 @@
+[node]
+port = 9100
+host = "0.0.0.0"
+storage = "node.db"
+
+[network]
+bootstrap = ["bootstrap1.knarr.network:9000", "localhost:9200"]
+
+[skills.send-telegram]
+handler = "adapters/telegram/send_telegram.py:handle"
+description = "Send a message to a Telegram chat"
+tags = ["telegram", "messaging", "gateway"]
+input_schema = {chat_id = "string", text = "string"}
+output_schema = {message_id = "string", status = "string"}
+
+[skills.fetch-telegram]
+handler = "adapters/telegram/fetch_telegram.py:handle"
+description = "Fetch recent messages from a Telegram chat"
+tags = ["telegram", "messaging", "gateway"]
+input_schema = {chat_id = "string"}
+output_schema = {messages_json = "string", count = "string"}
