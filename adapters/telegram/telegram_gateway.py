@@ -1298,28 +1298,47 @@ async def main() -> None:
         log.error("Make sure a Knarr node is running with the cockpit enabled.")
         sys.exit(1)
 
-    # Try to load LLM router if Gemini API key is configured
+    # LLM router — supports two modes:
+    #   1. LLM_MODEL (provider-agnostic via LiteLLM): LLM_MODEL, LLM_API_KEY, LLM_API_BASE
+    #   2. GEMINI_API_KEY (legacy direct Gemini): GEMINI_API_KEY, FALLBACK_MODEL, FALLBACK_API_KEY
     llm_router = None
+    llm_model = os.environ.get("LLM_MODEL", "")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if gemini_key:
+    if llm_model or gemini_key:
         try:
             from llm_router import LLMRouter
-            llm_router = LLMRouter(
-                gemini_key,
-                chat_store=_chat_store,
-                cron_store=cron_store,
-                memory_store=memory_store,
-                session_store=session_store,
-                fallback_model=os.environ.get("FALLBACK_MODEL", ""),
-                fallback_api_key=os.environ.get("FALLBACK_API_KEY", ""),
-            )
-            log.info("LLM agent enabled (Gemini)")
+            if llm_model and not gemini_key:
+                llm_router = LLMRouter(
+                    api_key="",
+                    chat_store=_chat_store,
+                    cron_store=cron_store,
+                    memory_store=memory_store,
+                    session_store=session_store,
+                    fallback_model=llm_model,
+                    fallback_api_key=os.environ.get("LLM_API_KEY", ""),
+                    fallback_api_base=os.environ.get("LLM_API_BASE", ""),
+                    llm_only=True,
+                )
+                log.info("LLM agent enabled via LiteLLM (%s)", llm_model)
+            else:
+                llm_router = LLMRouter(
+                    api_key=gemini_key,
+                    chat_store=_chat_store,
+                    cron_store=cron_store,
+                    memory_store=memory_store,
+                    session_store=session_store,
+                    fallback_model=os.environ.get("FALLBACK_MODEL", llm_model),
+                    fallback_api_key=os.environ.get("FALLBACK_API_KEY",
+                                                     os.environ.get("LLM_API_KEY", "")),
+                    fallback_api_base=os.environ.get("LLM_API_BASE", ""),
+                )
+                log.info("LLM agent enabled (Gemini primary)")
         except ImportError:
-            log.warning("GEMINI_API_KEY set but llm_router.py not found — LLM agent disabled")
+            log.warning("LLM configured but llm_router.py not found — LLM agent disabled")
         except Exception as e:
             log.warning("Failed to initialize LLM router: %s", e)
     else:
-        log.info("No GEMINI_API_KEY — LLM agent disabled, command-only mode")
+        log.info("No LLM_MODEL or GEMINI_API_KEY — command-only mode")
 
     # Warm up the LLM skill catalog
     if llm_router:

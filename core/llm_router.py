@@ -1184,22 +1184,31 @@ class LLMRouter:
     Configure via FALLBACK_MODEL and FALLBACK_API_KEY environment variables.
     """
 
-    def __init__(self, api_key: str, model: str = "gemini-3-flash-preview",
+    def __init__(self, api_key: str = "", model: str = "gemini-3-flash-preview",
                  chat_store=None, cron_store=None, memory_store=None,
                  session_store=None,
-                 fallback_model: str = "", fallback_api_key: str = ""):
-        self.client = genai.Client(api_key=api_key)
+                 fallback_model: str = "", fallback_api_key: str = "",
+                 fallback_api_base: str = "",
+                 llm_only: bool = False):
+        self.llm_only = llm_only
+        if api_key:
+            self.client = genai.Client(api_key=api_key)
+        else:
+            self.client = None
         self.model = model
         self.chat_store = chat_store
         self.cron_store = cron_store
         self.memory_store = memory_store
         self.session_store = session_store
 
-        # Fallback LLM provider (via LiteLLM)
+        # LiteLLM provider (primary when llm_only=True, fallback otherwise)
         self.fallback_model = fallback_model or os.environ.get("FALLBACK_MODEL", "")
         self.fallback_api_key = fallback_api_key or os.environ.get("FALLBACK_API_KEY", "")
+        self.fallback_api_base = fallback_api_base or os.environ.get("LLM_API_BASE", "")
         if self.fallback_model:
-            log.info("Fallback LLM configured: %s", self.fallback_model)
+            log.info("LiteLLM provider configured: %s%s",
+                     self.fallback_model,
+                     f" via {self.fallback_api_base}" if self.fallback_api_base else "")
 
         # Skill catalog: { function_name: { "original_name": str, "sheet": dict, "provider": dict } }
         self._skill_catalog: dict[str, dict] = {}
@@ -3767,6 +3776,11 @@ class LLMRouter:
                 log.warning("Status update failed (non-fatal): %s", e)
         status_fn = safe_status_fn if _raw_status_fn else None
 
+        if self.llm_only or not self.client:
+            return await self._fallback_route(
+                client, chat_id, text, all_declarations, effective_prompt, status_fn,
+            )
+
         try:
             return await self._gemini_route(
                 client, chat_id, text, media_bytes, media_mime,
@@ -4151,6 +4165,8 @@ class LLMRouter:
             }
             if self.fallback_api_key:
                 kwargs["api_key"] = self.fallback_api_key
+            if self.fallback_api_base:
+                kwargs["api_base"] = self.fallback_api_base
 
             response = await litellm.acompletion(**kwargs)
             msg = response.choices[0].message
