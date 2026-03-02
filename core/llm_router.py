@@ -650,12 +650,8 @@ OWNERSHIP OF YOUR GOALS:
 
 PARALLEL EXECUTION — fire multiple independent calls simultaneously:
 - Use run_parallel when you need results from several independent sources at once.
-  Example: check vault stats, knarr inbox, and economy in one shot:
-  run_parallel calls=[
-    {"skill": "knowledge_vault", "args": {"action": "stats"}},
-    {"skill": "knarr_mail", "args": {"action": "poll"}},
-    {"skill": "fetch_url", "args": {"url": "http://127.0.0.1:8080/economy", "headers": "..."}}
-  ]
+  Pass a JSON string as calls_json:
+  run_parallel calls_json='[{"skill":"knowledge_vault","args":{"action":"stats"}},{"skill":"knarr_mail","args":{"action":"poll"}}]'
 - Max 10 concurrent calls per invocation. Results come back as a list in the same order.
 - Only use for INDEPENDENT calls. If B needs A's output, do them sequentially.
 - This is how you scale your cognition — don't do 5 things in 5 rounds when you can do them in 1.
@@ -1315,26 +1311,26 @@ LOCAL_TOOL_DECLARATIONS = [
         "description": (
             "Fire multiple independent skill calls simultaneously and get all results at once. "
             "Use when you need results from several independent sources that don't depend on each other. "
-            "Examples: search 3 keywords at once, read 5 vault files simultaneously, check economy + "
-            "peer list + inbox in one shot. Each call is a dict with 'skill' (name) and 'args' (object). "
-            "Results come back as a list in the same order as the calls. "
-            "DO NOT use for dependent calls — if call B needs the output of call A, do them sequentially."
+            "Examples: search 3 keywords at once, read vault files simultaneously, check economy + "
+            "peer list + inbox in one shot. "
+            "Results come back in the same order as the calls. "
+            "DO NOT use for dependent calls — if call B needs the output of call A, do them sequentially. "
+            "Pass calls as a JSON array string, e.g.: "
+            "'[{\"skill\":\"knowledge_vault\",\"args\":{\"action\":\"stats\"}},{\"skill\":\"knarr_mail\",\"args\":{\"action\":\"poll\"}}]'"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "calls": {
-                    "type": "array",
+                "calls_json": {
+                    "type": "string",
                     "description": (
-                        "List of skill calls to run in parallel. Each item has: "
-                        "'skill' (the skill/tool name, e.g. 'knowledge_vault', 'web_search'), "
-                        "'args' (object with the call arguments). "
-                        "Example: [{\"skill\": \"knowledge_vault\", \"args\": {\"action\": \"stats\"}}, "
-                        "{\"skill\": \"knarr_mail\", \"args\": {\"action\": \"poll\"}}]"
+                        "JSON array of skill calls. Each element: {\"skill\": \"tool_name\", \"args\": {\"param\": \"value\"}}. "
+                        "Example: [{\"skill\":\"knowledge_vault\",\"args\":{\"action\":\"stats\",\"vault\":\"default\"}},"
+                        "{\"skill\":\"knarr_mail\",\"args\":{\"action\":\"poll\"}}]"
                     ),
                 },
             },
-            "required": ["calls"],
+            "required": ["calls_json"],
         },
     },
 ]
@@ -3224,9 +3220,16 @@ class LLMRouter:
 
         # --- Parallel skill composition ---
         elif func_name == "run_parallel":
-            calls = args.get("calls", [])
+            calls_raw = args.get("calls_json") or args.get("calls", [])
+            if isinstance(calls_raw, str):
+                try:
+                    calls = json.loads(calls_raw)
+                except Exception:
+                    return {"error": "run_parallel: calls_json must be a valid JSON array"}
+            else:
+                calls = calls_raw
             if not isinstance(calls, list) or not calls:
-                return {"error": "run_parallel requires a non-empty 'calls' list"}
+                return {"error": "run_parallel requires a non-empty calls array"}
             if len(calls) > 10:
                 return {"error": "run_parallel: max 10 concurrent calls per invocation"}
 
