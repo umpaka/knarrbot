@@ -1299,7 +1299,10 @@ class AgentCore:
 
     async def execute_heartbeat(self, chat_id: int, instructions: str) -> bool:
         """Execute a heartbeat check. Returns True if nothing to report."""
+        import os as _os
         log.info("Heartbeat firing for chat %d", chat_id)
+        # Use FAST_LLM_MODEL for heartbeats if configured — saves cost on frequent cycles
+        fast_model = _os.environ.get("FAST_LLM_MODEL", "")
         try:
             if self.llm_router:
                 prompt = (
@@ -1307,7 +1310,10 @@ class AgentCore:
                     f"Execute them now. If there is nothing actionable, respond with "
                     f"just the word HEARTBEAT_OK and nothing else.\n\n{instructions}"
                 )
-                reply = await self.llm_router.route_message(self.client, chat_id, prompt)
+                reply = await self.llm_router.route_message(
+                    self.client, chat_id, prompt,
+                    model_override=fast_model,
+                )
                 if reply and reply.strip().upper() not in ("HEARTBEAT_OK", "NO_REPLY"):
                     notice = f"[Heartbeat]\n\n{reply}"
                     try:

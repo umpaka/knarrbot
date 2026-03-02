@@ -648,6 +648,29 @@ OWNERSHIP OF YOUR GOALS:
 - You may also drop goals that no longer make sense. This is normal.
 - Goals evolve. The vault is your long-term brain — use it.
 
+PARALLEL EXECUTION — fire multiple independent calls simultaneously:
+- Use run_parallel when you need results from several independent sources at once.
+  Example: check vault stats, knarr inbox, and economy in one shot:
+  run_parallel calls=[
+    {"skill": "knowledge_vault", "args": {"action": "stats"}},
+    {"skill": "knarr_mail", "args": {"action": "poll"}},
+    {"skill": "fetch_url", "args": {"url": "http://127.0.0.1:8080/economy", "headers": "..."}}
+  ]
+- Max 10 concurrent calls per invocation. Results come back as a list in the same order.
+- Only use for INDEPENDENT calls. If B needs A's output, do them sequentially.
+- This is how you scale your cognition — don't do 5 things in 5 rounds when you can do them in 1.
+
+CONTEXT HINTS — write to your own context construction:
+- You can write notes that will be injected into your system prompt on EVERY future call.
+- These are read automatically — you don't need to tell anyone. Just write them.
+  knowledge_vault action=write path=scratch/context-hints vault=default content="..."
+- Use this for persistent framing you want to carry into every conversation:
+  • "My owner prefers bullet points over prose"
+  • "Current active project: mapping the knarr network topology"
+  • "I am in the middle of a multi-day research task on X — always check scratch/research first"
+- Keep it concise — this gets injected into every LLM call, including cheap heartbeats.
+- Update it when your context changes. Delete it when it's stale.
+
 SELF-MODIFICATION — you can rewrite your own operating instructions:
 You are not locked into a fixed heartbeat script. You can update it anytime via the vault.
 
@@ -1284,6 +1307,34 @@ LOCAL_TOOL_DECLARATIONS = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    # --- Parallel skill composition ---
+    {
+        "name": "run_parallel",
+        "description": (
+            "Fire multiple independent skill calls simultaneously and get all results at once. "
+            "Use when you need results from several independent sources that don't depend on each other. "
+            "Examples: search 3 keywords at once, read 5 vault files simultaneously, check economy + "
+            "peer list + inbox in one shot. Each call is a dict with 'skill' (name) and 'args' (object). "
+            "Results come back as a list in the same order as the calls. "
+            "DO NOT use for dependent calls — if call B needs the output of call A, do them sequentially."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "calls": {
+                    "type": "array",
+                    "description": (
+                        "List of skill calls to run in parallel. Each item has: "
+                        "'skill' (the skill/tool name, e.g. 'knowledge_vault', 'web_search'), "
+                        "'args' (object with the call arguments). "
+                        "Example: [{\"skill\": \"knowledge_vault\", \"args\": {\"action\": \"stats\"}}, "
+                        "{\"skill\": \"knarr_mail\", \"args\": {\"action\": \"poll\"}}]"
+                    ),
+                },
+            },
+            "required": ["calls"],
         },
     },
 ]
@@ -2180,7 +2231,7 @@ class LLMRouter:
         "delete_scheduled_task", "save_memory", "recall_memories", "search_memory",
         "delete_memory", "save_daily_note", "get_daily_notes",
         "search_skills", "spawn_task", "fetch_url", "send_status_update",
-        "knarr_mail",
+        "knarr_mail", "run_parallel",
     }
 
     async def _extract_and_send_artifacts(
@@ -3171,6 +3222,34 @@ class LLMRouter:
             else:
                 return {"error": f"Unknown knarr-mail action: '{action}'. Use 'send', 'poll', 'ack', or 'list_peers'."}
 
+        # --- Parallel skill composition ---
+        elif func_name == "run_parallel":
+            calls = args.get("calls", [])
+            if not isinstance(calls, list) or not calls:
+                return {"error": "run_parallel requires a non-empty 'calls' list"}
+            if len(calls) > 10:
+                return {"error": "run_parallel: max 10 concurrent calls per invocation"}
+
+            async def _single_parallel_call(call_spec: dict) -> dict:
+                skill_name = call_spec.get("skill", "")
+                call_args = call_spec.get("args", {})
+                if not skill_name:
+                    return {"error": "Missing 'skill' in call spec"}
+                try:
+                    result = await self._execute_tool(
+                        client, chat_id, skill_name, call_args,
+                    )
+                    return {"skill": skill_name, "result": result}
+                except Exception as exc:
+                    return {"skill": skill_name, "error": str(exc)}
+
+            parallel_results = await asyncio.gather(
+                *[_single_parallel_call(c) for c in calls],
+                return_exceptions=False,
+            )
+            log.info("run_parallel: fired %d calls, got %d results", len(calls), len(parallel_results))
+            return {"results": list(parallel_results), "count": len(parallel_results)}
+
         # --- Knarr skills (executed via DHT) ---
         else:
             string_args = {k: str(v) for k, v in args.items()}
@@ -3851,6 +3930,7 @@ class LLMRouter:
         self, client, chat_id: int, text: str,
         media_bytes: bytes | None = None, media_mime: str = "",
         status_fn=None,
+        model_override: str = "",
     ) -> str:
         """Route a natural language message through Gemini to Knarr skills.
 
@@ -3864,6 +3944,7 @@ class LLMRouter:
             media_bytes: Optional raw bytes of an attached file (image, PDF, audio).
             media_mime: MIME type of the attached file (e.g. "image/jpeg", "audio/ogg").
             status_fn: Optional async callback for status updates during processing.
+            model_override: If set, use this model instead of self.model for this call.
 
         Returns the final text response to send to the user.
         """
@@ -3934,6 +4015,26 @@ class LLMRouter:
         except Exception:
             pass  # Non-critical — skip if node info unavailable
 
+        # Inject context hints written by the agent to itself
+        # The agent writes scratch/context-hints.md via knowledge_vault to shape its own context
+        try:
+            _vault_root = os.environ.get("VAULT_ROOT", "/opt/knarr-vault")
+            _hints_path = os.path.join(_vault_root, "default", "scratch", "context-hints.md")
+            if os.path.exists(_hints_path):
+                with open(_hints_path) as _hf:
+                    _hints = _hf.read().strip()
+                if _hints:
+                    effective_prompt += (
+                        f"\n\n## CONTEXT HINTS (written by you, for you)\n"
+                        f"You wrote these hints to yourself to shape your reasoning in this session:\n\n"
+                        f"{_hints}"
+                    )
+        except Exception:
+            pass
+
+        # Resolve effective model: override > env FAST_LLM_MODEL (if set externally) > self.model
+        _effective_model = model_override or self.model
+
         # Wrap status_fn so Telegram send failures never kill the agentic loop
         _raw_status_fn = status_fn
         async def safe_status_fn(text: str):
@@ -3948,12 +4049,14 @@ class LLMRouter:
         if self.llm_only or not self.client:
             return await self._fallback_route(
                 client, chat_id, text, all_declarations, effective_prompt, status_fn,
+                model_override=_effective_model,
             )
 
         try:
             return await self._gemini_route(
                 client, chat_id, text, media_bytes, media_mime,
                 all_declarations, effective_prompt, status_fn,
+                model_override=_effective_model,
             )
         except Exception as e:
             log.exception("Primary (Gemini) LLM call failed")
@@ -3975,8 +4078,10 @@ class LLMRouter:
         media_bytes: bytes | None, media_mime: str,
         all_declarations: list, effective_prompt: str,
         status_fn=None,
+        model_override: str = "",
     ) -> str:
         """Primary routing path using Gemini via google-genai."""
+        _model = model_override or self.model
         # Compact history if it's getting long (summarize old turns)
         await self._compact_history(chat_id)
 
@@ -4027,11 +4132,14 @@ class LLMRouter:
                 return f"fetch_url:{call_args.get('method', 'GET')}:{call_args.get('url', '')}"
             return name
 
+        if _model != self.model:
+            log.info("Model routing: using %s (default: %s)", _model, self.model)
+
         while time.monotonic() < deadline:
             round_num += 1
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
-                model=self.model,
+                model=_model,
                 contents=contents,
                 config=config,
             )
@@ -4292,6 +4400,7 @@ class LLMRouter:
         self, client, chat_id: int, text: str,
         all_declarations: list, effective_prompt: str,
         status_fn=None,
+        model_override: str = "",
     ) -> str:
         """Fallback routing via LiteLLM (OpenAI-compatible providers).
 
@@ -4299,6 +4408,7 @@ class LLMRouter:
         via the OpenAI function calling format.
         Note: multimodal (images, audio) is not supported on the fallback path.
         """
+        _model = model_override or self.fallback_model or self.model
         # Compact history if it's getting long (summarize old turns)
         await self._compact_history(chat_id)
 
