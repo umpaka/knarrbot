@@ -622,8 +622,31 @@ def build_system_prompt(base_dir: str | None = None) -> str:
     return f"{personality}\n\n{_TOOL_DOCS}\n\n{instructions}"
 
 
-# Build on import (can be rebuilt with build_system_prompt() if files change)
-SYSTEM_PROMPT = build_system_prompt()
+_prompt_cache: str = ""
+_prompt_mtime: float = 0
+
+
+def get_system_prompt(base_dir: str | None = None) -> str:
+    """Return the current system prompt, auto-reloading when personality files change."""
+    global _prompt_cache, _prompt_mtime
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    p_path = os.path.join(base_dir, "PERSONALITY.md")
+    i_path = os.path.join(base_dir, "INSTRUCTIONS.md")
+    try:
+        current = max(
+            os.path.getmtime(p_path) if os.path.exists(p_path) else 0,
+            os.path.getmtime(i_path) if os.path.exists(i_path) else 0,
+        )
+    except OSError:
+        current = 0
+    if current != _prompt_mtime or not _prompt_cache:
+        _prompt_cache = build_system_prompt(base_dir)
+        _prompt_mtime = current
+    return _prompt_cache
+
+
+SYSTEM_PROMPT = get_system_prompt()
 
 
 # ── Schema-aware argument validation ────────────────────────────────────
@@ -3735,12 +3758,13 @@ class LLMRouter:
         all_declarations = list(self._function_declarations)
         all_declarations.extend(LOCAL_TOOL_DECLARATIONS)
 
-        # Inject memory context into system prompt
-        effective_prompt = SYSTEM_PROMPT
+        # Inject memory context into system prompt (auto-reloads if files changed)
+        base_prompt = get_system_prompt()
+        effective_prompt = base_prompt
         if self.memory_store:
             memory_ctx = self.memory_store.format_memory_context(chat_id)
             if memory_ctx:
-                effective_prompt = SYSTEM_PROMPT + "\n\n" + memory_ctx
+                effective_prompt = base_prompt + "\n\n" + memory_ctx
 
         # Inject node identity so the bot knows who it is on the network
         try:
