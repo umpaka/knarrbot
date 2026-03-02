@@ -1325,8 +1325,6 @@ class LLMRouter:
         """
         all_skills = await client.get_skills()
         network = all_skills.get("network", [])
-        if not network:
-            return {}
         seen = {}
         for s in network:
             name = s.get("name", "")
@@ -1350,6 +1348,35 @@ class LLMRouter:
                     "sidecar_port": s["providers"][0].get("sidecar_port", 0) if s.get("providers") else 0,
                     "providers": s.get("providers", []),
                 }
+
+        # Also include local-only skills (e.g. private vault not advertised on DHT).
+        # These are executed with local=True — no network routing needed.
+        for s in all_skills.get("local", []):
+            name = s.get("name", "")
+            if name and name not in seen:
+                seen[name] = {
+                    "skill_sheet": {
+                        "name": name,
+                        "version": s.get("version", ""),
+                        "description": s.get("description", ""),
+                        "tags": s.get("tags", []),
+                        "input_schema": s.get("input_schema", {}),
+                        "input_schema_full": s.get("input_schema_full", {}),
+                        "price": 0.0,
+                        "uri": "",
+                        "jurisdiction": [],
+                        "max_input_size": s.get("max_input_size", 65536),
+                    },
+                    "node_id": "",
+                    "host": "",
+                    "port": 0,
+                    "sidecar_port": 0,
+                    "providers": [],
+                    "_local_only": True,
+                }
+
+        if not seen:
+            return {}
         return seen
 
     def _apply_catalog(self, seen: dict) -> None:
@@ -3109,12 +3136,11 @@ class LLMRouter:
                         break
                 if not results:
                     # Fallback: skill may be local but not yet reflected by
-                    # network peers (happens after node restart).  Construct a
-                    # synthetic provider from the cockpit's own status.
+                    # network peers (happens after node restart or for private skills).
+                    # Private skills are intentionally local-only — execute them here.
                     local_names = {
                         s.get("name", "").lower()
                         for s in all_skills.get("local", [])
-                        if s.get("visibility") != "private"
                     }
                     if original_name.lower() in local_names:
                         try:
