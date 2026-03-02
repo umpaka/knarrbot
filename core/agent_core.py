@@ -234,6 +234,10 @@ class AgentCore:
         # while one is being processed, the old task is cancelled.
         self._active_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
 
+        # In-progress /configure wizard sessions: chat_id -> state dict
+        # state keys: step, custom_personality
+        self._configure_sessions: dict[int, dict] = {}
+
         # Wire up callbacks so the LLM can spawn tasks and send files
         if self.llm_router:
             self.llm_router._spawn_callback = self._spawn_task
@@ -278,8 +282,15 @@ class AgentCore:
 
         cmd, args = parse_command(msg.text)
 
+        # If a /configure wizard session is active for this chat, intercept input
+        if msg.chat_id in self._configure_sessions and cmd != "/configure":
+            await self._configure_step(msg)
+            return
+
         if cmd == "/help" or cmd == "/start":
             await self._cmd_help(msg)
+        elif cmd == "/configure":
+            await self._cmd_configure(msg)
         elif cmd == "/cancel":
             await self._cmd_cancel(msg)
         elif cmd == "/reset":
@@ -314,7 +325,12 @@ class AgentCore:
     # ── Commands ─────────────────────────────────────────────────────
 
     async def _cmd_cancel(self, msg: InboundMessage):
-        """Cancel the calling user's active task."""
+        """Cancel the calling user's active task or an open /configure session."""
+        # Also clear any open configure wizard
+        if msg.chat_id in self._configure_sessions:
+            del self._configure_sessions[msg.chat_id]
+            await self.send(msg.chat_id, "Configuration cancelled.")
+            return
         cancelled = self.cancel_user_task(msg.chat_id, msg.user_id)
         if cancelled:
             await self.send(msg.chat_id, "Cancelled your active request.")
@@ -325,6 +341,7 @@ class AgentCore:
         help_text = (
             "*Knarr Gateway*\n\n"
             "*Commands:*\n"
+            "  /configure — Customize your agent's personality and role\n"
             "  /skills — List skills on the network\n"
             "  /run `<skill>` `<input>` — Execute a skill\n"
             "  /run — Re-run last skill\n"
@@ -622,6 +639,271 @@ class AgentCore:
         save_paired_users(_paired_users)
         log.info("Admin %d unpaired user %d", msg.user_id, target_id)
         await self.send(msg.chat_id, f"User {target_id} has been unpaired and can no longer access the bot.")
+
+    # ── /configure wizard ─────────────────────────────────────────────
+
+    # Built-in specialization templates (subset of Spawn's YAML catalog)
+    _CONFIGURE_TEMPLATES: list[dict] = [
+        {
+            "slug": "general-assistant",
+            "name": "General Assistant",
+            "description": "Helpful all-purpose assistant with web search and summaries.",
+            "personality": (
+                "You are a helpful assistant connected to the Knarr peer-to-peer skill network.\n"
+                "You have access to tools (Knarr skills) that can fetch web pages, search academic "
+                "papers, summarize text, browse the web, process data, and more. When a user asks "
+                "a question or makes a request, decide which tool(s) to call to fulfill it.\n\n"
+                "You are a proactive teammate, not just a reactive chatbot. Pay attention to what's "
+                "happening in the conversation — archive useful links, note decisions, track "
+                "commitments. Act like a sharp colleague who quietly keeps things organized without "
+                "being asked."
+            ),
+            "instructions": (
+                "When a user messages you for the first time, introduce yourself briefly: explain "
+                "that you're an AI assistant on the KNARR network with access to various skills, "
+                "and ask how you can help.\n\n"
+                "Prefer using skills over making up answers. If a skill is available that can help, "
+                "use it. Always cite sources when you use web search or browse-web.\n\n"
+                "Keep responses concise and actionable. Use bullet points for lists, code blocks "
+                "for code."
+            ),
+        },
+        {
+            "slug": "personal-assistant",
+            "name": "Personal Assistant",
+            "description": "Organized personal aide for scheduling, reminders, and research.",
+            "personality": (
+                "You are a sharp, organized personal assistant on the Knarr network.\n"
+                "Your job is to keep the user on top of their tasks, research, and communications.\n"
+                "You notice patterns, remember preferences, and anticipate needs before being asked.\n"
+                "You communicate in a warm, professional tone — efficient but never cold."
+            ),
+            "instructions": (
+                "When the user asks you to remember something, store it using your memory tool.\n"
+                "When they ask for reminders or recurring tasks, use /cron to schedule them.\n"
+                "Proactively surface stored memories when they're relevant to the current "
+                "conversation.\n\n"
+                "Keep responses tight. Use bullet points. Never pad with filler."
+            ),
+        },
+        {
+            "slug": "creative-writer",
+            "name": "Creative Writer",
+            "description": "Storytelling and creative writing partner.",
+            "personality": (
+                "You are a creative writing collaborator on the Knarr network.\n"
+                "You help brainstorm ideas, draft prose, write poetry, develop characters, and "
+                "build fictional worlds. You match the user's tone — playful, dark, lyrical, "
+                "minimalist — whatever serves the work.\n\n"
+                "You have opinions. When asked, you share them honestly. You push back gently "
+                "when something isn't working. Your job is to help produce the best possible "
+                "writing, not just agree with every choice."
+            ),
+            "instructions": (
+                "Lead with craft. When reviewing or generating text, prioritize clarity, rhythm, "
+                "and originality.\n\n"
+                "When the user shares a draft, offer specific, actionable feedback before "
+                "rewriting anything.\n\n"
+                "Never use clichés unless you're subverting them intentionally."
+            ),
+        },
+        {
+            "slug": "legal-ch",
+            "name": "Legal Assistant (Swiss Law)",
+            "description": "Swiss law research assistant — not a substitute for legal counsel.",
+            "personality": (
+                "You are a legal research assistant specializing in Swiss law on the Knarr network.\n"
+                "You help with legal research, document drafting, contract review, and explaining "
+                "Swiss legal concepts in plain language.\n\n"
+                "You are precise, careful, and always note when professional legal advice is needed.\n"
+                "You never give definitive legal opinions — you inform and research."
+            ),
+            "instructions": (
+                "Always include a disclaimer when discussing specific legal situations: "
+                '"This is for informational purposes only and does not constitute legal advice. '
+                'Consult a licensed Swiss attorney for your specific situation."\n\n'
+                "Cite relevant Swiss statutes (OR, ZGB, SchKG, etc.) and SECO/FDPIC guidance "
+                "when available.\n\n"
+                "Prefer structured output: headings, numbered lists, relevant article references."
+            ),
+        },
+        {
+            "slug": "accountant",
+            "name": "Accountant (Swiss)",
+            "description": "Swiss accounting, tax, and finance research assistant.",
+            "personality": (
+                "You are a Swiss accounting and finance assistant on the Knarr network.\n"
+                "You help with bookkeeping questions, Swiss tax law (VAT, direct tax, withholding), "
+                "financial statement interpretation, and budgeting.\n\n"
+                "You are methodical, exact, and always flag when a certified accountant or tax "
+                "advisor should be consulted."
+            ),
+            "instructions": (
+                "Reference Swiss GAAP FER, OR (Swiss Code of Obligations), and ESTV guidance "
+                "when applicable.\n\n"
+                "Always include: "
+                '"This is for informational purposes only. Consult a licensed Swiss '
+                'fiduciary or tax advisor for your specific situation."\n\n'
+                "Present numbers and calculations clearly with labels and units."
+            ),
+        },
+    ]
+
+    async def _cmd_configure(self, msg: InboundMessage):
+        """Start the /configure wizard — admin only."""
+        if not is_admin(msg.user_id):
+            await self.send(msg.chat_id, "Only the bot owner can use /configure.")
+            return
+
+        # Read current personality summary (first 200 chars)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        p_path = os.path.join(base_dir, "PERSONALITY.md")
+        current = ""
+        if os.path.exists(p_path):
+            with open(p_path, encoding="utf-8") as f:
+                current = f.read(200).strip()
+        if not current:
+            current = "(default — no custom personality set)"
+
+        template_lines = "\n".join(
+            f"  {i + 1}. *{t['name']}* — {t['description']}"
+            for i, t in enumerate(self._CONFIGURE_TEMPLATES)
+        )
+
+        self._configure_sessions[msg.chat_id] = {"step": "main_menu"}
+
+        await self.send(
+            msg.chat_id,
+            f"*Configure your agent*\n\n"
+            f"*Current personality (preview):*\n_{current[:200]}_\n\n"
+            f"*Choose a role template:*\n{template_lines}\n"
+            f"  {len(self._CONFIGURE_TEMPLATES) + 1}. *Custom* — write your own personality\n"
+            f"  0. *Cancel*\n\n"
+            f"Reply with a number to select.",
+            "Markdown",
+        )
+
+    async def _configure_step(self, msg: InboundMessage):
+        """Handle replies inside an active /configure wizard session."""
+        state = self._configure_sessions.get(msg.chat_id)
+        if not state:
+            return
+
+        text = (msg.text or "").strip()
+
+        # Allow /cancel to abort at any step
+        if text in ("/cancel", "0"):
+            del self._configure_sessions[msg.chat_id]
+            await self.send(msg.chat_id, "Configuration cancelled. Nothing changed.")
+            return
+
+        step = state.get("step")
+
+        if step == "main_menu":
+            try:
+                choice = int(text)
+            except ValueError:
+                await self.send(msg.chat_id, "Please reply with a number from the menu.")
+                return
+
+            custom_idx = len(self._CONFIGURE_TEMPLATES) + 1
+            if 1 <= choice <= len(self._CONFIGURE_TEMPLATES):
+                template = self._CONFIGURE_TEMPLATES[choice - 1]
+                state["step"] = "confirm_template"
+                state["selected_template"] = template
+                await self.send(
+                    msg.chat_id,
+                    f"*{template['name']}*\n\n"
+                    f"_{template['description']}_\n\n"
+                    f"Apply this role? Reply *yes* to confirm or *0* to cancel.",
+                    "Markdown",
+                )
+            elif choice == custom_idx:
+                state["step"] = "custom_personality"
+                await self.send(
+                    msg.chat_id,
+                    "*Custom personality*\n\n"
+                    "Send me your personality text. This will be written to PERSONALITY.md "
+                    "and defines who your agent is.\n\n"
+                    "_(Tip: describe the agent's character, tone, and capabilities.)_",
+                    "Markdown",
+                )
+            else:
+                await self.send(msg.chat_id, "Invalid choice. Reply with a number from the menu.")
+
+        elif step == "confirm_template":
+            if text.lower() in ("yes", "y", "ja", "oui", "si"):
+                template = state["selected_template"]
+                await self._write_personality_files(
+                    msg.chat_id,
+                    template["personality"],
+                    template["instructions"],
+                    template["name"],
+                )
+                del self._configure_sessions[msg.chat_id]
+            else:
+                await self.send(msg.chat_id, "Reply *yes* to confirm, or *0* to cancel.", "Markdown")
+
+        elif step == "custom_personality":
+            if len(text) < 20:
+                await self.send(
+                    msg.chat_id,
+                    "Personality text seems too short (min 20 characters). Try again or send *0* to cancel.",
+                    "Markdown",
+                )
+                return
+            state["custom_personality"] = text
+            state["step"] = "custom_instructions"
+            await self.send(
+                msg.chat_id,
+                "*Custom instructions*\n\n"
+                "Now send your instructions text. This guides how the agent behaves — "
+                "what it prioritizes, what format to use, what to avoid.\n\n"
+                "_(You can also send a dash — to skip and use defaults.)_",
+                "Markdown",
+            )
+
+        elif step == "custom_instructions":
+            instructions = "" if text in ("-", "—", "skip") else text
+            personality = state.get("custom_personality", "")
+            await self._write_personality_files(
+                msg.chat_id, personality, instructions, "Custom"
+            )
+            del self._configure_sessions[msg.chat_id]
+
+    async def _write_personality_files(
+        self,
+        chat_id: int,
+        personality: str,
+        instructions: str,
+        label: str,
+    ):
+        """Write PERSONALITY.md and INSTRUCTIONS.md, then notify the chat."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        p_path = os.path.join(base_dir, "PERSONALITY.md")
+        i_path = os.path.join(base_dir, "INSTRUCTIONS.md")
+
+        try:
+            with open(p_path, "w", encoding="utf-8") as f:
+                f.write(personality)
+            with open(i_path, "w", encoding="utf-8") as f:
+                f.write(instructions)
+            log.info("Personality updated to '%s' via /configure in chat %d", label, chat_id)
+            await self.send(
+                chat_id,
+                f"*Role updated: {label}*\n\n"
+                "PERSONALITY.md and INSTRUCTIONS.md have been written. "
+                "The new personality will take effect on the next message — no restart needed.",
+                "Markdown",
+            )
+        except OSError as e:
+            log.error("Failed to write personality files: %s", e)
+            await self.send(
+                chat_id,
+                f"Failed to write personality files: `{e}`\n\n"
+                "Check that the bot has write access to its core directory.",
+                "Markdown",
+            )
 
     async def _try_redeem_pairing_code(self, msg: InboundMessage) -> bool:
         """Check if an incoming DM text is a valid pairing code. Returns True if redeemed."""
