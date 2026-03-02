@@ -798,7 +798,10 @@ class AgentCore:
                     msg.chat_id,
                     "*Generate personality*\n\n"
                     "Describe the role you want your agent to have. A sentence or two is enough.\n\n"
-                    "_Example: \"A sharp Swiss legal assistant focused on startup contracts and GDPR compliance\"_\n\n"
+                    "_Examples:_\n"
+                    "_• \"A dry-humoured research assistant obsessed with citations\"_\n"
+                    "_• \"A no-nonsense project manager who tracks tasks and deadlines\"_\n"
+                    "_• \"A creative writing partner with a taste for dark fiction\"_\n\n"
                     "_(Send *0* to cancel.)_",
                     "Markdown",
                 )
@@ -857,10 +860,13 @@ class AgentCore:
             state["generated_personality"] = personality
             state["generated_instructions"] = instructions
 
-            preview = personality[:400] + ("..." if len(personality) > 400 else "")
+            p_preview = personality[:350] + ("..." if len(personality) > 350 else "")
+            i_preview = instructions[:250] + ("..." if len(instructions) > 250 else "")
             await self.send(
                 msg.chat_id,
-                f"*Generated personality preview:*\n\n_{preview}_\n\n"
+                f"*Generated — review before applying:*\n\n"
+                f"*PERSONALITY.md:*\n_{p_preview}_\n\n"
+                f"*INSTRUCTIONS.md:*\n_{i_preview}_\n\n"
                 f"Reply *yes* to apply, *0* to cancel, or *edit* to paste your own text instead.",
                 "Markdown",
             )
