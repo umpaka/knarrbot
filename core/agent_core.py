@@ -26,10 +26,10 @@ log = logging.getLogger("agent")
 
 # ── Access control ────────────────────────────────────────────────
 
-PAIRED_USERS_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "paired_users.json",
-)
+_DATA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PAIRED_USERS_FILE = os.path.join(_DATA_DIR, "paired_users.json")
+OWNER_FILE = os.path.join(_DATA_DIR, "owner.json")
 
 
 def load_access_list(env_var: str) -> set[int]:
@@ -70,6 +70,26 @@ def save_paired_users(users: set[int]):
         log.exception("Failed to save paired_users.json")
 
 
+def load_owner() -> int | None:
+    """Return the claimed owner user ID, or None if unclaimed."""
+    if not os.path.exists(OWNER_FILE):
+        return None
+    try:
+        with open(OWNER_FILE, "r") as f:
+            return int(json.load(f).get("user_id", 0)) or None
+    except Exception:
+        return None
+
+
+def save_owner(user_id: int):
+    """Persist the claimed owner to disk."""
+    try:
+        with open(OWNER_FILE, "w") as f:
+            json.dump({"user_id": user_id}, f)
+    except Exception:
+        log.exception("Failed to save owner.json")
+
+
 # Loaded once at import time; reload by calling reload_access_lists()
 _allowed_users: set[int] = set()
 _allowed_groups: set[int] = set()
@@ -89,7 +109,11 @@ def reload_access_lists():
         log.info("Access control: %d allowed users, %d allowed groups, %d paired users",
                  len(_allowed_users), len(_allowed_groups), len(_paired_users))
     else:
-        log.info("Access control: open (no ALLOWED_USERS/ALLOWED_GROUPS set)")
+        owner = load_owner()
+        if owner:
+            log.info("Access control: owner-claimed (user %d)", owner)
+        else:
+            log.info("Access control: open — first DM will claim ownership")
 
 
 # Initialize on import
@@ -97,36 +121,45 @@ reload_access_lists()
 
 
 def is_admin(user_id: int) -> bool:
-    """Check if a user is an admin (in the ALLOWED_USERS env var list)."""
-    return bool(_allowed_users and user_id in _allowed_users)
+    """Check if a user is an admin.
+
+    Priority:
+    1. ALLOWED_USERS env var (explicit list)
+    2. owner.json (first-claim ownership)
+    """
+    if _allowed_users:
+        return user_id in _allowed_users
+    owner = load_owner()
+    return owner is not None and user_id == owner
 
 
 def access_check(msg: InboundMessage) -> bool:
     """Check if a message sender is allowed to use the bot.
 
     Rules:
-    - If neither ALLOWED_USERS nor ALLOWED_GROUPS is set → open access (allow all)
+    - If neither ALLOWED_USERS nor ALLOWED_GROUPS is set AND no owner claimed → open access
+    - If owner claimed (owner.json) → only owner + paired users
     - If ALLOWED_USERS is set → user's numeric ID must be in the list OR in paired users
     - If ALLOWED_GROUPS is set → group's chat_id must be in the list
     - In groups: the group must be allowed AND (if ALLOWED_USERS is set) the user too
-
-    This function is designed to be replaceable — e.g., swap in a crypto payment
-    check when Knarr adds that feature.
     """
-    if not _allowed_users and not _allowed_groups:
-        return True  # Open access
+    owner = load_owner()
+    has_explicit_control = bool(_allowed_users or _allowed_groups or owner)
+
+    if not has_explicit_control:
+        return True  # Fully open — first DM will claim ownership
 
     all_allowed = _allowed_users | _paired_users
+    if owner:
+        all_allowed.add(owner)
 
     if msg.is_group:
         if _allowed_groups and msg.chat_id not in _allowed_groups:
             return False
-        # In groups, if ALLOWED_USERS is set, also check the sender
         if all_allowed and msg.user_id and msg.user_id not in all_allowed:
             return False
         return True
     else:
-        # DMs: check user against env + paired
         if all_allowed and msg.user_id not in all_allowed:
             return False
         return True
@@ -296,6 +329,25 @@ class AgentCore:
 
     async def process_message(self, msg: InboundMessage):
         """Process an inbound message from any channel."""
+        # First-claim ownership: if no access control is configured and no owner
+        # has been claimed yet, the first person to DM the bot becomes the owner.
+        if (
+            not msg.is_group
+            and msg.user_id
+            and not _allowed_users
+            and not _allowed_groups
+            and load_owner() is None
+        ):
+            save_owner(msg.user_id)
+            log.info("Ownership claimed by user %d (%s)", msg.user_id, msg.from_user)
+            await self.send(
+                msg.chat_id,
+                "You are now the owner of this bot.\n\n"
+                "Your Telegram ID has been saved as the admin. "
+                "Type /help to see what you can do, or /configure to set your agent's personality.",
+            )
+            # Fall through — process the message normally now that they're the owner
+
         # Before access control, check for pairing code redemption from unknown DMs.
         # This allows an unauthorized user to redeem a code and gain access.
         if not access_check(msg):
