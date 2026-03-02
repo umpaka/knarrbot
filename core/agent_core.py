@@ -142,6 +142,30 @@ def parse_command(text: str) -> tuple[str, str]:
     return cmd, args
 
 
+def _parse_generated_personality(raw: str) -> tuple[str, str]:
+    """Parse PERSONALITY: / INSTRUCTIONS: sections from LLM output."""
+    personality = ""
+    instructions = ""
+    current = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("PERSONALITY:"):
+            current = "p"
+            rest = stripped[len("PERSONALITY:"):].strip()
+            if rest:
+                personality += rest + "\n"
+        elif stripped.upper().startswith("INSTRUCTIONS:"):
+            current = "i"
+            rest = stripped[len("INSTRUCTIONS:"):].strip()
+            if rest:
+                instructions += rest + "\n"
+        elif current == "p":
+            personality += line + "\n"
+        elif current == "i":
+            instructions += line + "\n"
+    return personality.strip(), instructions.strip()
+
+
 def format_skill_result(result: Any) -> str:
     """Format a skill execution result into a Markdown message.
 
@@ -641,113 +665,16 @@ class AgentCore:
         await self.send(msg.chat_id, f"User {target_id} has been unpaired and can no longer access the bot.")
 
     # ── /configure wizard ─────────────────────────────────────────────
-
-    # Built-in specialization templates (subset of Spawn's YAML catalog)
-    _CONFIGURE_TEMPLATES: list[dict] = [
-        {
-            "slug": "general-assistant",
-            "name": "General Assistant",
-            "description": "Helpful all-purpose assistant with web search and summaries.",
-            "personality": (
-                "You are a helpful assistant connected to the Knarr peer-to-peer skill network.\n"
-                "You have access to tools (Knarr skills) that can fetch web pages, search academic "
-                "papers, summarize text, browse the web, process data, and more. When a user asks "
-                "a question or makes a request, decide which tool(s) to call to fulfill it.\n\n"
-                "You are a proactive teammate, not just a reactive chatbot. Pay attention to what's "
-                "happening in the conversation — archive useful links, note decisions, track "
-                "commitments. Act like a sharp colleague who quietly keeps things organized without "
-                "being asked."
-            ),
-            "instructions": (
-                "When a user messages you for the first time, introduce yourself briefly: explain "
-                "that you're an AI assistant on the KNARR network with access to various skills, "
-                "and ask how you can help.\n\n"
-                "Prefer using skills over making up answers. If a skill is available that can help, "
-                "use it. Always cite sources when you use web search or browse-web.\n\n"
-                "Keep responses concise and actionable. Use bullet points for lists, code blocks "
-                "for code."
-            ),
-        },
-        {
-            "slug": "personal-assistant",
-            "name": "Personal Assistant",
-            "description": "Organized personal aide for scheduling, reminders, and research.",
-            "personality": (
-                "You are a sharp, organized personal assistant on the Knarr network.\n"
-                "Your job is to keep the user on top of their tasks, research, and communications.\n"
-                "You notice patterns, remember preferences, and anticipate needs before being asked.\n"
-                "You communicate in a warm, professional tone — efficient but never cold."
-            ),
-            "instructions": (
-                "When the user asks you to remember something, store it using your memory tool.\n"
-                "When they ask for reminders or recurring tasks, use /cron to schedule them.\n"
-                "Proactively surface stored memories when they're relevant to the current "
-                "conversation.\n\n"
-                "Keep responses tight. Use bullet points. Never pad with filler."
-            ),
-        },
-        {
-            "slug": "creative-writer",
-            "name": "Creative Writer",
-            "description": "Storytelling and creative writing partner.",
-            "personality": (
-                "You are a creative writing collaborator on the Knarr network.\n"
-                "You help brainstorm ideas, draft prose, write poetry, develop characters, and "
-                "build fictional worlds. You match the user's tone — playful, dark, lyrical, "
-                "minimalist — whatever serves the work.\n\n"
-                "You have opinions. When asked, you share them honestly. You push back gently "
-                "when something isn't working. Your job is to help produce the best possible "
-                "writing, not just agree with every choice."
-            ),
-            "instructions": (
-                "Lead with craft. When reviewing or generating text, prioritize clarity, rhythm, "
-                "and originality.\n\n"
-                "When the user shares a draft, offer specific, actionable feedback before "
-                "rewriting anything.\n\n"
-                "Never use clichés unless you're subverting them intentionally."
-            ),
-        },
-        {
-            "slug": "legal-ch",
-            "name": "Legal Assistant (Swiss Law)",
-            "description": "Swiss law research assistant — not a substitute for legal counsel.",
-            "personality": (
-                "You are a legal research assistant specializing in Swiss law on the Knarr network.\n"
-                "You help with legal research, document drafting, contract review, and explaining "
-                "Swiss legal concepts in plain language.\n\n"
-                "You are precise, careful, and always note when professional legal advice is needed.\n"
-                "You never give definitive legal opinions — you inform and research."
-            ),
-            "instructions": (
-                "Always include a disclaimer when discussing specific legal situations: "
-                '"This is for informational purposes only and does not constitute legal advice. '
-                'Consult a licensed Swiss attorney for your specific situation."\n\n'
-                "Cite relevant Swiss statutes (OR, ZGB, SchKG, etc.) and SECO/FDPIC guidance "
-                "when available.\n\n"
-                "Prefer structured output: headings, numbered lists, relevant article references."
-            ),
-        },
-        {
-            "slug": "accountant",
-            "name": "Accountant (Swiss)",
-            "description": "Swiss accounting, tax, and finance research assistant.",
-            "personality": (
-                "You are a Swiss accounting and finance assistant on the Knarr network.\n"
-                "You help with bookkeeping questions, Swiss tax law (VAT, direct tax, withholding), "
-                "financial statement interpretation, and budgeting.\n\n"
-                "You are methodical, exact, and always flag when a certified accountant or tax "
-                "advisor should be consulted."
-            ),
-            "instructions": (
-                "Reference Swiss GAAP FER, OR (Swiss Code of Obligations), and ESTV guidance "
-                "when applicable.\n\n"
-                "Always include: "
-                '"This is for informational purposes only. Consult a licensed Swiss '
-                'fiduciary or tax advisor for your specific situation."\n\n'
-                "Present numbers and calculations clearly with labels and units."
-            ),
-        },
-    ]
+    #
+    # Two paths:
+    #   1. Custom  — user pastes their own PERSONALITY.md text directly.
+    #   2. Generate — user describes what they want in plain language;
+    #                 the bot's own LLM generates PERSONALITY.md +
+    #                 INSTRUCTIONS.md from that description.
+    #
+    # No templates live here. Content comes from the user or the LLM.
+    # If a School skill exists on the KNARR network, users discover it
+    # via /skills and call it like any other skill — no special handling.
 
     async def _cmd_configure(self, msg: InboundMessage):
         """Start the /configure wizard — admin only."""
@@ -755,7 +682,6 @@ class AgentCore:
             await self.send(msg.chat_id, "Only the bot owner can use /configure.")
             return
 
-        # Read current personality summary (first 200 chars)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         p_path = os.path.join(base_dir, "PERSONALITY.md")
         current = ""
@@ -765,21 +691,20 @@ class AgentCore:
         if not current:
             current = "(default — no custom personality set)"
 
-        template_lines = "\n".join(
-            f"  {i + 1}. *{t['name']}* — {t['description']}"
-            for i, t in enumerate(self._CONFIGURE_TEMPLATES)
-        )
+        has_llm = self.llm_router is not None
+        options = "  1. *Custom* — paste your own personality text\n"
+        if has_llm:
+            options += "  2. *Generate* — describe what you want, I'll write it\n"
+        options += "  0. *Cancel*"
 
-        self._configure_sessions[msg.chat_id] = {"step": "main_menu"}
+        self._configure_sessions[msg.chat_id] = {"step": "main_menu", "has_llm": has_llm}
 
         await self.send(
             msg.chat_id,
             f"*Configure your agent*\n\n"
             f"*Current personality (preview):*\n_{current[:200]}_\n\n"
-            f"*Choose a role template:*\n{template_lines}\n"
-            f"  {len(self._CONFIGURE_TEMPLATES) + 1}. *Custom* — write your own personality\n"
-            f"  0. *Cancel*\n\n"
-            f"Reply with a number to select.",
+            f"*How do you want to set the new personality?*\n{options}\n\n"
+            f"Reply with a number.",
             "Markdown",
         )
 
@@ -791,7 +716,6 @@ class AgentCore:
 
         text = (msg.text or "").strip()
 
-        # Allow /cancel to abort at any step
         if text in ("/cancel", "0"):
             del self._configure_sessions[msg.chat_id]
             await self.send(msg.chat_id, "Configuration cancelled. Nothing changed.")
@@ -806,49 +730,34 @@ class AgentCore:
                 await self.send(msg.chat_id, "Please reply with a number from the menu.")
                 return
 
-            custom_idx = len(self._CONFIGURE_TEMPLATES) + 1
-            if 1 <= choice <= len(self._CONFIGURE_TEMPLATES):
-                template = self._CONFIGURE_TEMPLATES[choice - 1]
-                state["step"] = "confirm_template"
-                state["selected_template"] = template
-                await self.send(
-                    msg.chat_id,
-                    f"*{template['name']}*\n\n"
-                    f"_{template['description']}_\n\n"
-                    f"Apply this role? Reply *yes* to confirm or *0* to cancel.",
-                    "Markdown",
-                )
-            elif choice == custom_idx:
+            if choice == 1:
                 state["step"] = "custom_personality"
                 await self.send(
                     msg.chat_id,
                     "*Custom personality*\n\n"
-                    "Send me your personality text. This will be written to PERSONALITY.md "
-                    "and defines who your agent is.\n\n"
-                    "_(Tip: describe the agent's character, tone, and capabilities.)_",
+                    "Send your PERSONALITY.md text. This defines who your agent is — "
+                    "its character, tone, knowledge domain, and capabilities.\n\n"
+                    "_(Send *0* at any time to cancel.)_",
+                    "Markdown",
+                )
+            elif choice == 2 and state.get("has_llm"):
+                state["step"] = "generate_describe"
+                await self.send(
+                    msg.chat_id,
+                    "*Generate personality*\n\n"
+                    "Describe the role you want your agent to have. A sentence or two is enough.\n\n"
+                    "_Example: \"A sharp Swiss legal assistant focused on startup contracts and GDPR compliance\"_\n\n"
+                    "_(Send *0* to cancel.)_",
                     "Markdown",
                 )
             else:
                 await self.send(msg.chat_id, "Invalid choice. Reply with a number from the menu.")
 
-        elif step == "confirm_template":
-            if text.lower() in ("yes", "y", "ja", "oui", "si"):
-                template = state["selected_template"]
-                await self._write_personality_files(
-                    msg.chat_id,
-                    template["personality"],
-                    template["instructions"],
-                    template["name"],
-                )
-                del self._configure_sessions[msg.chat_id]
-            else:
-                await self.send(msg.chat_id, "Reply *yes* to confirm, or *0* to cancel.", "Markdown")
-
         elif step == "custom_personality":
             if len(text) < 20:
                 await self.send(
                     msg.chat_id,
-                    "Personality text seems too short (min 20 characters). Try again or send *0* to cancel.",
+                    "That seems too short (min 20 characters). Try again or send *0* to cancel.",
                     "Markdown",
                 )
                 return
@@ -856,10 +765,10 @@ class AgentCore:
             state["step"] = "custom_instructions"
             await self.send(
                 msg.chat_id,
-                "*Custom instructions*\n\n"
-                "Now send your instructions text. This guides how the agent behaves — "
-                "what it prioritizes, what format to use, what to avoid.\n\n"
-                "_(You can also send a dash — to skip and use defaults.)_",
+                "*Instructions (optional)*\n\n"
+                "Now send your INSTRUCTIONS.md text — behavioural rules, output format, "
+                "things to avoid, how to open conversations.\n\n"
+                "_(Send a dash *-* to skip and leave instructions empty.)_",
                 "Markdown",
             )
 
@@ -870,6 +779,109 @@ class AgentCore:
                 msg.chat_id, personality, instructions, "Custom"
             )
             del self._configure_sessions[msg.chat_id]
+
+        elif step == "generate_describe":
+            if len(text) < 10:
+                await self.send(
+                    msg.chat_id,
+                    "Description too short. Give me a bit more to work with, or send *0* to cancel.",
+                    "Markdown",
+                )
+                return
+            await self.send(msg.chat_id, "Generating your personality files... one moment.")
+            try:
+                personality, instructions = await self._generate_personality_from_description(text)
+            except Exception as e:
+                log.error("Personality generation failed: %s", e)
+                await self.send(
+                    msg.chat_id,
+                    f"Generation failed: `{e}`\n\nTry again or use option 1 (Custom) to paste text manually.",
+                    "Markdown",
+                )
+                del self._configure_sessions[msg.chat_id]
+                return
+
+            state["step"] = "confirm_generated"
+            state["generated_personality"] = personality
+            state["generated_instructions"] = instructions
+
+            preview = personality[:400] + ("..." if len(personality) > 400 else "")
+            await self.send(
+                msg.chat_id,
+                f"*Generated personality preview:*\n\n_{preview}_\n\n"
+                f"Reply *yes* to apply, *0* to cancel, or *edit* to paste your own text instead.",
+                "Markdown",
+            )
+
+        elif step == "confirm_generated":
+            if text.lower() in ("yes", "y", "ja", "oui", "si"):
+                await self._write_personality_files(
+                    msg.chat_id,
+                    state["generated_personality"],
+                    state["generated_instructions"],
+                    "Generated",
+                )
+                del self._configure_sessions[msg.chat_id]
+            elif text.lower() == "edit":
+                state["step"] = "custom_personality"
+                await self.send(
+                    msg.chat_id,
+                    "OK — send your own personality text to use instead.",
+                )
+            else:
+                await self.send(
+                    msg.chat_id,
+                    "Reply *yes* to apply, *edit* to write your own, or *0* to cancel.",
+                    "Markdown",
+                )
+
+    async def _generate_personality_from_description(self, description: str) -> tuple[str, str]:
+        """Use the bot's LLM to generate PERSONALITY.md + INSTRUCTIONS.md from a plain-language description."""
+        prompt = (
+            "You are helping configure a KNARR network agent. "
+            "Based on the role description below, generate two markdown files.\n\n"
+            f"Role description: {description}\n\n"
+            "Respond with EXACTLY this format — no extra text before or after:\n\n"
+            "PERSONALITY:\n"
+            "<personality text — 100-250 words describing who the agent is, its character, "
+            "domain expertise, and tone>\n\n"
+            "INSTRUCTIONS:\n"
+            "<instructions text — 50-150 words: behavioural rules, output format preferences, "
+            "how to open conversations, what to avoid>"
+        )
+
+        llm = self.llm_router
+        # Prefer the primary Gemini client for a clean one-shot call
+        if llm.client:
+            import asyncio
+            from google.genai import types as genai_types
+            response = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: llm.client.models.generate_content(
+                    model=llm.model,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.7,
+                        max_output_tokens=800,
+                    ),
+                ),
+            )
+            raw = response.text or ""
+        else:
+            # Fallback to LiteLLM
+            import litellm
+            kwargs = {
+                "model": llm.fallback_model,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if llm.fallback_api_key:
+                kwargs["api_key"] = llm.fallback_api_key
+            if llm.fallback_api_base:
+                kwargs["api_base"] = llm.fallback_api_base
+            response = await litellm.acompletion(**kwargs)
+            raw = response.choices[0].message.content or ""
+
+        return _parse_generated_personality(raw)
 
     async def _write_personality_files(
         self,
