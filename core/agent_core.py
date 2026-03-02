@@ -860,13 +860,11 @@ class AgentCore:
             state["generated_personality"] = personality
             state["generated_instructions"] = instructions
 
-            p_preview = personality[:350] + ("..." if len(personality) > 350 else "")
-            i_preview = instructions[:250] + ("..." if len(instructions) > 250 else "")
             await self.send(
                 msg.chat_id,
                 f"*Generated — review before applying:*\n\n"
-                f"*PERSONALITY.md:*\n_{p_preview}_\n\n"
-                f"*INSTRUCTIONS.md:*\n_{i_preview}_\n\n"
+                f"*PERSONALITY.md:*\n_{personality}_\n\n"
+                f"*INSTRUCTIONS.md:*\n_{instructions}_\n\n"
                 f"Reply *yes* to apply, *0* to cancel, or *edit* to paste your own text instead.",
                 "Markdown",
             )
