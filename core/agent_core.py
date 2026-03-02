@@ -27,9 +27,34 @@ log = logging.getLogger("agent")
 # ── Access control ────────────────────────────────────────────────
 
 _DATA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PAIRED_USERS_FILE = os.path.join(_DATA_DIR, "paired_users.json")
 OWNER_FILE = os.path.join(_DATA_DIR, "owner.json")
+WELCOME_FILE = os.path.join(_CORE_DIR, "WELCOME.md")
+
+_WELCOME_FALLBACK = (
+    "Hello, I'm your agent on the Knarr network. Fresh off the press.\n\n"
+    "A few things worth trying:\n"
+    "• Talk to me — directly here or invite me into a group channel\n"
+    "• /configure — tell me what role you want me to play\n"
+    "• /skills — browse what's live on the network right now\n"
+    "• /help — if you have any questions\n\n"
+    "I work best once you /configure me. Takes 30 seconds."
+)
+
+
+def load_welcome_message() -> str:
+    """Load WELCOME.md if it exists, otherwise return the built-in fallback."""
+    if os.path.exists(WELCOME_FILE):
+        try:
+            with open(WELCOME_FILE, encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                return content
+        except OSError:
+            pass
+    return _WELCOME_FALLBACK
 
 
 def load_access_list(env_var: str) -> set[int]:
@@ -340,12 +365,7 @@ class AgentCore:
         ):
             save_owner(msg.user_id)
             log.info("Ownership claimed by user %d (%s)", msg.user_id, msg.from_user)
-            await self.send(
-                msg.chat_id,
-                "You are now the owner of this bot.\n\n"
-                "Your Telegram ID has been saved as the admin. "
-                "Type /help to see what you can do, or /configure to set your agent's personality.",
-            )
+            await self.send(msg.chat_id, load_welcome_message())
             # Fall through — process the message normally now that they're the owner
 
         # Before access control, check for pairing code redemption from unknown DMs.
