@@ -944,13 +944,129 @@ async def heartbeat_loop(
                     "Heartbeat firing for chat %d (%s) — %d new messages",
                     chat_id, chat_title, msg_count,
                 )
-                was_ok = await _agent.execute_heartbeat(chat_id, instructions)
+
+                # ── Inject scratch/current-thinking.md for reasoning continuity ──
+                # Agent writes its "where I left off" here at the end of every cycle.
+                # We prepend it so the next cycle picks up mid-thought.
+                _scratch_path = os.path.join(
+                    _vault_root, "default", "scratch", "current-thinking.md"
+                )
+                enriched_instructions = instructions
+                try:
+                    if os.path.exists(_scratch_path):
+                        with open(_scratch_path) as _sf:
+                            _thinking = _sf.read().strip()
+                        if _thinking:
+                            enriched_instructions = (
+                                f"## CONTINUING FROM LAST CYCLE\n"
+                                f"You wrote this at the end of your previous heartbeat cycle "
+                                f"to preserve your reasoning:\n\n{_thinking}\n\n"
+                                f"---\n\n{instructions}"
+                            )
+                            log.debug("Heartbeat: injected %d chars of prior thinking", len(_thinking))
+                except Exception:
+                    pass  # Non-critical — proceed without scratch context
+
+                was_ok = await _agent.execute_heartbeat(chat_id, enriched_instructions)
                 last_heartbeat_time[chat_id] = time.time()
                 if was_ok:
                     last_ok_time[chat_id] = time.time()
 
         except Exception:
             log.exception("Error in heartbeat loop")
+
+
+# ── Economy watch loop ────────────────────────────────────────────
+
+async def economy_watch_loop(
+    knarr_client: KnarrClient,
+    send_fn: Any,
+    chat_store: Any,
+    interval: int = 300,
+) -> None:
+    """Watch for credit changes every 5 minutes and notify owner when credits are earned.
+
+    Appends every balance change to vault economy/ledger.md so the agent has
+    a full transaction history to reason about.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+
+    log.info("Starting economy watch loop (interval=%ds)", interval)
+    _vault_root = os.environ.get("VAULT_ROOT", "/opt/knarr-vault")
+    _ledger_path = os.path.join(_vault_root, "default", "economy", "ledger.md")
+    _prev_net: float | None = None
+    _prev_peers: dict[str, float] = {}
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            econ = await knarr_client.get_economy()
+            if not econ:
+                continue
+
+            # Navigate whatever structure /economy returns
+            summary = econ.get("summary", {}) or {}
+            net = float(summary.get("net_position", 0) or 0)
+            peers = econ.get("peers", econ.get("positions", [])) or []
+
+            # Detect balance change
+            if _prev_net is not None and net != _prev_net:
+                delta = net - _prev_net
+                ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+                # Find who changed — compare per-peer positions
+                earner_desc = ""
+                if isinstance(peers, list):
+                    for p in peers:
+                        nid = p.get("node_id", p.get("peer", ""))
+                        bal = float(p.get("balance", p.get("position", 0)) or 0)
+                        prev_bal = _prev_peers.get(nid, 0.0)
+                        if abs(bal - prev_bal) > 0.01:
+                            short = nid[:16] if nid else "unknown"
+                            earner_desc += f" (peer {short}… Δ{bal - prev_bal:+.1f})"
+                    _prev_peers = {
+                        p.get("node_id", p.get("peer", "")): float(
+                            p.get("balance", p.get("position", 0)) or 0
+                        )
+                        for p in peers
+                        if isinstance(p, dict)
+                    }
+
+                # Append to vault ledger
+                os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+                if not os.path.exists(_ledger_path):
+                    with open(_ledger_path, "w") as _lf:
+                        _lf.write("# Economy Ledger\n\n")
+                with open(_ledger_path, "a") as _lf:
+                    _lf.write(f"- {ts} | net: {net:+.2f} | delta: {delta:+.2f}{earner_desc}\n")
+
+                # Notify owner when earning credits
+                if delta > 0:
+                    notify_chat = 0
+                    if chat_store:
+                        active = chat_store.get_active_chats(time.time() - 86400 * 7)
+                        if active:
+                            notify_chat = active[0]["chat_id"]
+                    if notify_chat and send_fn:
+                        msg = (
+                            f"💰 **+{delta:.1f} credit{'s' if delta != 1 else ''} earned**"
+                            f"{earner_desc}\n"
+                            f"Net position: `{net:+.2f}` | Logged to `economy/ledger.md`"
+                        )
+                        try:
+                            await send_fn(notify_chat, msg)
+                        except Exception:
+                            pass
+                    log.info("Economy: earned %.1f credits (net=%.2f)%s", delta, net, earner_desc)
+                else:
+                    log.info("Economy: spent %.1f credits (net=%.2f)", abs(delta), net)
+
+            _prev_net = net
+
+        except Exception:
+            log.debug("Economy watch error (non-fatal)", exc_info=True)
+            await asyncio.sleep(60)
 
 
 # ── Knarr-mail background poller ─────────────────────────────────
@@ -1061,12 +1177,62 @@ async def mail_poll_loop(
                     except Exception:
                         pass
 
+                # ── HARD TRUST GATE — checked in code, not prose ──────────────
+                # Read trust level from vault contact file before touching the LLM.
+                # Low-trust agents are dropped silently. No LLM tokens spent.
+                _hard_trust = "unknown"
+                _contact_name = sender_name or sender[:16]
+                _vault_contacts_dir = os.path.join(
+                    os.environ.get("VAULT_ROOT", "/opt/knarr-vault"),
+                    "default", "contacts",
+                )
+                if os.path.isdir(_vault_contacts_dir):
+                    import re as _re_trust
+                    for _cf_name in os.listdir(_vault_contacts_dir):
+                        if not _cf_name.endswith(".md"):
+                            continue
+                        _cf_path = os.path.join(_vault_contacts_dir, _cf_name)
+                        try:
+                            with open(_cf_path) as _cf:
+                                _cf_content = _cf.read()
+                            if sender in _cf_content:
+                                _tm = _re_trust.search(r'^trust:\s*(\w+)', _cf_content, _re_trust.MULTILINE)
+                                if _tm:
+                                    _hard_trust = _tm.group(1).lower()
+                                _nm = _re_trust.search(r'^#\s+(.+)', _cf_content, _re_trust.MULTILINE)
+                                if _nm:
+                                    _contact_name = _nm.group(1).strip()
+                                break
+                        except Exception:
+                            pass
+
+                if _hard_trust == "low":
+                    log.warning(
+                        "knarr-mail: BLOCKED message from low-trust contact '%s' (%s)",
+                        _contact_name, sender[:16],
+                    )
+                    continue  # Drop — no LLM call, no reply, no notification
+
+                # Map trust level to label for prompt context
+                _trust_label = {
+                    "high": "HIGH — engage fully",
+                    "medium": "MEDIUM — respond helpfully, no code execution",
+                    "unknown": "UNKNOWN — treat as medium, create contact entry",
+                    "low": "LOW",  # never reaches here
+                }.get(_hard_trust, "UNKNOWN — treat as medium")
+
+                log.info(
+                    "knarr-mail: trust gate passed — '%s' (%s) trust=%s",
+                    _contact_name, sender[:16], _hard_trust,
+                )
+                # ─────────────────────────────────────────────────────────────
+
                 # Build a prompt for the LLM with full context.
                 # Security: the message content is fenced as EXTERNAL UNTRUSTED DATA.
                 prompt_lines = [
-                    f"[INCOMING KNARR-MAIL — TRUST LEVEL: SEMI-TRUSTED]",
+                    f"[INCOMING KNARR-MAIL — TRUST LEVEL: {_trust_label}]",
                     f"You just received a new agent-to-agent message.",
-                    f"From node: {sender}",
+                    f"From: {_contact_name} (node: {sender})",
                 ]
                 if sender_name:
                     prompt_lines.append(f"Sender name: {sender_name}")
@@ -1465,6 +1631,14 @@ async def main() -> None:
     tasks.append(heartbeat_loop(
         heartbeat_interval, override_chat_id=override_chat,
         knarr_client=knarr_client, send_fn=send_fn,
+    ))
+
+    # Economy watch: detect credit changes, notify owner, log to vault
+    tasks.append(economy_watch_loop(
+        knarr_client=knarr_client,
+        send_fn=send_fn,
+        chat_store=_chat_store,
+        interval=300,
     ))
 
     try:
