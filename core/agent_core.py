@@ -365,7 +365,15 @@ class AgentCore:
         ):
             save_owner(msg.user_id)
             log.info("Ownership claimed by user %d (%s)", msg.user_id, msg.from_user)
-            await self.send(msg.chat_id, load_welcome_message())
+            welcome = load_welcome_message()
+            try:
+                status = await self.client.get_status()
+                node_id = status.get("node_id", "")
+                if node_id:
+                    welcome += f"\n\nNode ID: `{node_id}`"
+            except Exception:
+                pass
+            await self.send(msg.chat_id, welcome, "Markdown")
             return  # Welcome sent — don't also route the triggering message through LLM
 
         # Before access control, check for pairing code redemption from unknown DMs.
