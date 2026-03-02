@@ -40,7 +40,7 @@ _WELCOME_FALLBACK = (
     "• /configure — tell me what role you want me to play\n"
     "• /skills — browse what's live on the network right now\n"
     "• /help — if you have any questions\n\n"
-    "I work best once you /configure me. Takes 30 seconds."
+    "I work best once you /configure me."
 )
 
 
@@ -366,7 +366,7 @@ class AgentCore:
             save_owner(msg.user_id)
             log.info("Ownership claimed by user %d (%s)", msg.user_id, msg.from_user)
             await self.send(msg.chat_id, load_welcome_message())
-            # Fall through — process the message normally now that they're the owner
+            return  # Welcome sent — don't also route the triggering message through LLM
 
         # Before access control, check for pairing code redemption from unknown DMs.
         # This allows an unauthorized user to redeem a code and gain access.
