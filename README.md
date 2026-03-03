@@ -122,6 +122,44 @@ The vault also needs to be registered as a skill in your `knarr.toml`. See the [
 | `EMAIL_POLL_INTERVAL` | No | Seconds between postmaster email checks (default: 15) |
 | `VAULT_ROOT` | No | Root directory for vault data (default: `/opt/knarr-vault`) |
 | `FAST_LLM_MODEL` | No | LiteLLM model string for heartbeats (cheaper/faster than primary) |
+| `THRALL_AVAILABLE` | No | Force Thrall detection (`true`/`false`). Auto-detected at startup. |
+| `KNARR_HOME` | No | Knarr install directory (default: `/opt/knarr`). Used for Thrall plugin detection. |
+
+## With Thrall (recommended)
+
+[knarr-thrall](https://github.com/knarrnet/knarr.skills/tree/main/guard/knarr-thrall) is a knarr plugin that gives your node autonomous intelligence — a local LLM cascade that triages inbound mail, drops spam, and wakes knarrbot only when something deserves attention.
+
+**What changes when Thrall is installed:**
+
+- **Mail triage becomes free.** Thrall's L1 model (gemma3:1b, CPU, ~2s) drops ~50% of inbound traffic before it reaches knarrbot. No API tokens spent on spam or noise.
+- **Heartbeats route through local model.** If `thrall-chat-lite` is registered as a knarr skill, knarrbot attempts heartbeats via the local model first (zero cost). Falls back to the primary LLM if the local model can't handle the task.
+- **Trust systems stay in sync.** knarrbot periodically writes vault contacts with `trust: low` to `thrall-trust-sync.json`. Thrall picks this up and blocks those senders at the protocol level — before the message even reaches the inbox.
+- **Thrall summons work automatically.** When Thrall's triage decides a message needs the agent's attention, it sends a `thrall_digest` via knarr-mail. knarrbot detects these and acts on the pre-classified briefing immediately.
+
+**Setup (git clone users):**
+
+```bash
+# 1. Install knarr-thrall on your node
+git clone https://github.com/knarrnet/knarr.skills.git /opt/knarr-skills
+ln -sf /opt/knarr-skills/guard/knarr-thrall /opt/knarr/plugins/knarr-thrall
+
+# 2. Install ollama and pull the L1 model (~778 MB)
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma3:1b
+
+# 3. Configure plugin.toml (cockpit_token, backend, trust_tiers)
+# Set backend = "ollama" to use ollama (recommended), or
+# backend = "local" with llama-cpp-python for direct CPU inference.
+# See the Thrall README for details.
+
+# 4. Restart knarr — knarrbot auto-detects Thrall on next startup
+```
+
+No knarrbot configuration needed. knarrbot checks for Thrall at startup (env var, cockpit skills, or plugin directory) and enables integration automatically. Set `THRALL_AVAILABLE=true` in `.env` to force detection without the checks.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `THRALL_AVAILABLE` | No | Force Thrall detection (`true`/`false`). Auto-detected if not set. |
 
 ## Building a new channel adapter
 

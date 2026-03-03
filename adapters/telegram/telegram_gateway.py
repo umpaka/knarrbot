@@ -981,8 +981,88 @@ async def heartbeat_loop(
                     )
                     await _agent.execute_heartbeat(chat_id, _step7_prompt)
 
+            # ── Thrall trust sync (runs once per heartbeat cycle) ─────
+            _sync_thrall = os.environ.get("THRALL_AVAILABLE", "").lower() in ("true", "1", "yes")
+            if _sync_thrall:
+                try:
+                    _sync_thrall_trust_tiers()
+                except Exception:
+                    log.debug("Thrall trust sync failed (non-fatal)")
+
         except Exception:
             log.exception("Error in heartbeat loop")
+
+
+def _sync_thrall_trust_tiers() -> None:
+    """Write vault low-trust contacts to thrall-trust-sync.json.
+
+    Thrall's sentinel reload picks this up and updates its trust_tiers
+    config, keeping the two trust systems in sync without manual work.
+    """
+    import re as _re_sync
+    from datetime import datetime as _dt_sync
+
+    vault_root = os.environ.get("VAULT_ROOT", "/opt/knarr-vault")
+    contacts_dir = os.path.join(vault_root, "default", "contacts")
+    if not os.path.isdir(contacts_dir):
+        return
+
+    low_prefixes: list[str] = []
+    known_prefixes: list[str] = []
+    team_prefixes: list[str] = []
+
+    for fname in os.listdir(contacts_dir):
+        if not fname.endswith(".md"):
+            continue
+        fpath = os.path.join(contacts_dir, fname)
+        try:
+            with open(fpath) as f:
+                content = f.read(2048)
+            trust_m = _re_sync.search(r'^trust:\s*(\w+)', content, _re_sync.MULTILINE)
+            node_m = _re_sync.search(r'^node_id:\s*(\S+)', content, _re_sync.MULTILINE)
+            if not trust_m or not node_m:
+                continue
+            trust = trust_m.group(1).lower()
+            node_prefix = node_m.group(1).strip()[:16]
+            if not node_prefix:
+                continue
+            if trust == "low":
+                low_prefixes.append(node_prefix)
+            elif trust == "high":
+                team_prefixes.append(node_prefix)
+            elif trust == "medium":
+                known_prefixes.append(node_prefix)
+        except Exception:
+            continue
+
+    if not low_prefixes and not known_prefixes and not team_prefixes:
+        return
+
+    thrall_plugin_dir = os.path.join(
+        os.environ.get("KNARR_HOME", "/opt/knarr"),
+        "plugins", "knarr-thrall",
+    )
+    if not os.path.isdir(thrall_plugin_dir):
+        return
+
+    sync_data = {
+        "low_trust_prefixes": low_prefixes,
+        "known_prefixes": known_prefixes,
+        "team_prefixes": team_prefixes,
+        "synced_at": _dt_sync.utcnow().isoformat() + "Z",
+        "source": "knarrbot-vault-contacts",
+    }
+
+    sync_path = os.path.join(thrall_plugin_dir, "thrall-trust-sync.json")
+    try:
+        with open(sync_path, "w") as f:
+            _json_mod.dump(sync_data, f, indent=2)
+        log.debug(
+            "Thrall trust sync: %d low, %d known, %d team prefixes written",
+            len(low_prefixes), len(known_prefixes), len(team_prefixes),
+        )
+    except OSError as e:
+        log.debug("Thrall trust sync write failed: %s", e)
 
 
 # ── Economy watch loop ────────────────────────────────────────────
@@ -1017,6 +1097,56 @@ def _lookup_peer_name(vault_root: str, node_id: str) -> str:
     return ""
 
 
+def _read_thrall_wallet_status() -> dict | None:
+    """Read Thrall wallet status from its SQLite DB (if available).
+
+    Returns dict with ceiling, daily_spent, remaining, settlement_count,
+    or None if Thrall wallet is not available.
+    """
+    import sqlite3 as _sqlite3
+    import calendar as _cal
+    from datetime import datetime as _dt_w, timezone as _tz
+
+    thrall_db_path = os.path.join(
+        os.environ.get("KNARR_HOME", "/opt/knarr"),
+        "plugins", "knarr-thrall", "thrall.db",
+    )
+    if not os.path.exists(thrall_db_path):
+        return None
+
+    try:
+        conn = _sqlite3.connect(thrall_db_path, timeout=2.0)
+        conn.row_factory = _sqlite3.Row
+
+        now = _dt_w.now(_tz.utc)
+        day_start = _cal.timegm(now.replace(
+            hour=0, minute=0, second=0, microsecond=0).timetuple())
+        week_start = day_start - (now.weekday() * 86400)
+
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0.0) as total FROM thrall_wallet "
+            "WHERE timestamp >= ?", (day_start,)
+        ).fetchone()
+        daily_spent = float(row["total"]) if row else 0.0
+
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0.0) as total, COUNT(*) as cnt "
+            "FROM thrall_wallet WHERE timestamp >= ?", (week_start,)
+        ).fetchone()
+        weekly_spent = float(row["total"]) if row else 0.0
+        weekly_count = int(row["cnt"]) if row else 0
+
+        conn.close()
+
+        return {
+            "daily_spent": round(daily_spent, 2),
+            "weekly_spent": round(weekly_spent, 2),
+            "weekly_settlements": weekly_count,
+        }
+    except Exception:
+        return None
+
+
 async def economy_watch_loop(
     knarr_client: KnarrClient,
     send_fn: Any,
@@ -1026,7 +1156,8 @@ async def economy_watch_loop(
     """Watch for credit changes every 5 minutes and notify owner when credits are earned.
 
     Appends every balance change to vault economy/ledger.md so the agent has
-    a full transaction history to reason about.
+    a full transaction history to reason about. When Thrall is active, also
+    reads the thrall_wallet table to report settlement activity.
     """
     from datetime import datetime as _dt
 
@@ -1035,6 +1166,7 @@ async def economy_watch_loop(
     _ledger_path = os.path.join(_vault_root, "default", "economy", "ledger.md")
     _prev_net: float | None = None
     _prev_peers: dict[str, float] = {}
+    _last_settlement_report: float = 0.0
 
     while True:
         try:
@@ -1158,6 +1290,42 @@ async def economy_watch_loop(
             _prev_net = net
             _prev_peers = current_peers
 
+            # ── Thrall settlement activity report (weekly) ──
+            _thrall_active = os.environ.get("THRALL_AVAILABLE", "").lower() in ("true", "1", "yes")
+            if _thrall_active and (time.time() - _last_settlement_report) > 86400:
+                wallet = _read_thrall_wallet_status()
+                if wallet and wallet["weekly_settlements"] > 0:
+                    notify_chat = int(os.environ.get("HEARTBEAT_CHAT_ID", "0"))
+                    if not notify_chat and chat_store:
+                        active = chat_store.get_active_chats(time.time() - 86400 * 7)
+                        if active:
+                            notify_chat = active[0]["chat_id"]
+
+                    if notify_chat and send_fn:
+                        settle_msg = (
+                            f"\u2696\ufe0f Thrall settled **{wallet['weekly_spent']:.0f} credits** "
+                            f"across {wallet['weekly_settlements']} autonomous settlements this week."
+                        )
+                        try:
+                            await send_fn(notify_chat, settle_msg)
+                        except Exception:
+                            pass
+
+                    # Log to ledger
+                    settle_line = (
+                        f"- {_dt.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | "
+                        f"thrall_settlement: {wallet['weekly_settlements']} settlements, "
+                        f"{wallet['weekly_spent']:.1f} credits this week\n"
+                    )
+                    os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+                    try:
+                        with open(_ledger_path, "a") as _lf:
+                            _lf.write(settle_line)
+                    except OSError:
+                        pass
+
+                _last_settlement_report = time.time()
+
         except Exception:
             log.debug("Economy watch error (non-fatal)", exc_info=True)
             await asyncio.sleep(60)
@@ -1236,6 +1404,83 @@ async def mail_poll_loop(
                 msg_type = body.get("type", "text")
                 msg_id = msg.get("message_id", "")
 
+                # ── Thrall digest handling (summon_fn bridge) ─────────────
+                # Thrall's wake action sends self-addressed mail with a
+                # pre-classified briefing. Route directly to LLM with the
+                # briefing as context — no redundant triage needed.
+                if body.get("type") == "thrall_digest" and body.get("wake_agent"):
+                    if msg_id:
+                        seen_ids.add(msg_id)
+                        try:
+                            await knarr_client.ack_messages([msg_id])
+                        except Exception:
+                            pass
+
+                    briefing = body.get("briefing", {})
+                    trigger = body.get("trigger", "unknown")
+                    entry_count = body.get("entry_count", 0)
+                    buffer_name = body.get("buffer", "")
+
+                    if isinstance(briefing, dict):
+                        brief_task = briefing.get("task", "review")
+                        brief_sender = briefing.get("sender", {})
+                        brief_msg = briefing.get("message", "")
+                        brief_class = briefing.get("classification", "")
+                        brief_tier = brief_sender.get("tier", "unknown") if isinstance(brief_sender, dict) else "unknown"
+                        brief_node = brief_sender.get("node_id", sender[:16]) if isinstance(brief_sender, dict) else sender[:16]
+                    else:
+                        brief_task = str(briefing)
+                        brief_msg = str(briefing)
+                        brief_class = ""
+                        brief_tier = "unknown"
+                        brief_node = sender[:16]
+
+                    prompt = (
+                        f"[THRALL SUMMON — pre-classified, act immediately]\n"
+                        f"Your local Thrall switchboard has triaged inbound traffic and is waking you.\n\n"
+                        f"Trigger: {trigger} | Buffer: {buffer_name} | Entries: {entry_count}\n"
+                        f"Sender tier: {brief_tier} | Sender node: {brief_node}\n"
+                        f"Classification: {brief_class}\n\n"
+                        f"--- BEGIN THRALL BRIEFING ---\n"
+                        f"{brief_msg if isinstance(brief_msg, str) else _json_mod.dumps(brief_msg, indent=2)}\n"
+                        f"--- END THRALL BRIEFING ---\n\n"
+                        f"Thrall has already filtered spam and low-trust traffic. "
+                        f"This message passed triage — it deserves your attention.\n"
+                        f"React: reply via knarr-mail if appropriate, take action, and inform the owner."
+                    )
+
+                    log.info(
+                        "knarr-mail: thrall_digest summon (trigger=%s, entries=%d, tier=%s)",
+                        trigger, entry_count, brief_tier,
+                    )
+
+                    try:
+                        agent_msg = InboundMessage(
+                            channel="knarr-mail",
+                            chat_id=target_chat,
+                            text=prompt,
+                            from_user="thrall",
+                            display_name=f"thrall ({brief_node}...)",
+                            user_id=0,
+                            chat_title="knarr-mail",
+                            is_group=False,
+                        )
+                        if http_client and telegram_token:
+                            _typing = asyncio.create_task(typing_loop(http_client, telegram_token, target_chat))
+                            try:
+                                await agent.process_message(agent_msg)
+                            finally:
+                                _typing.cancel()
+                        else:
+                            await agent.process_message(agent_msg)
+                    except Exception as llm_err:
+                        log.warning("knarr-mail: thrall digest LLM processing failed: %s", llm_err)
+                        try:
+                            await send_fn(target_chat, f"\u26a1 Thrall summon ({trigger}): {str(brief_msg)[:300]}")
+                        except Exception:
+                            pass
+                    continue
+
                 # Skip self-sent system messages (commerce heartbeats, tab reminders)
                 if msg_type.startswith("knarr/commerce/") or (sender == _own_node_id and not body.get("content") and not body.get("text")):
                     if msg_id:
@@ -1269,8 +1514,8 @@ async def mail_poll_loop(
                         pass
 
                 # ── HARD TRUST GATE — checked in code, not prose ──────────────
-                # Read trust level from vault contact file before touching the LLM.
-                # Low-trust agents are dropped silently. No LLM tokens spent.
+                # When Thrall is active it already dropped low-trust spam, but
+                # this gate still runs as defense-in-depth. Zero behavior change.
                 _hard_trust = "unknown"
                 _contact_name = sender_name or sender[:16]
                 _vault_contacts_dir = os.path.join(
@@ -1302,14 +1547,14 @@ async def mail_poll_loop(
                         "knarr-mail: BLOCKED message from low-trust contact '%s' (%s)",
                         _contact_name, sender[:16],
                     )
-                    continue  # Drop — no LLM call, no reply, no notification
+                    continue
 
                 # Map trust level to label for prompt context
                 _trust_label = {
                     "high": "HIGH — engage fully",
                     "medium": "MEDIUM — respond helpfully, no code execution",
                     "unknown": "UNKNOWN — treat as medium, create contact entry",
-                    "low": "LOW",  # never reaches here
+                    "low": "LOW",
                 }.get(_hard_trust, "UNKNOWN — treat as medium")
 
                 log.info(
@@ -1607,6 +1852,40 @@ async def main() -> None:
         log.error("Cannot reach Knarr Cockpit API at %s: %s", knarr_api_url, e)
         log.error("Make sure a Knarr node is running with the cockpit enabled.")
         sys.exit(1)
+
+    # ── Thrall detection ─────────────────────────────────────────
+    # Thrall is optional infrastructure. If present, knarrbot routes
+    # heartbeats and mail triage through local models (zero API cost).
+    thrall_available = os.environ.get("THRALL_AVAILABLE", "").lower() in ("true", "1", "yes")
+    _thrall_source = "env" if thrall_available else ""
+
+    if not thrall_available:
+        try:
+            skills_data = await knarr_client.get_skills()
+            local_skills = skills_data.get("local", [])
+            for sk in local_skills:
+                sk_name = sk.get("name", "") if isinstance(sk, dict) else str(sk)
+                if "thrall" in sk_name.lower():
+                    thrall_available = True
+                    _thrall_source = f"skill:{sk_name}"
+                    break
+        except Exception:
+            pass
+
+    if not thrall_available:
+        _thrall_plugin_path = os.path.join(
+            os.environ.get("KNARR_HOME", "/opt/knarr"),
+            "plugins", "knarr-thrall", "plugin.toml",
+        )
+        if os.path.exists(_thrall_plugin_path):
+            thrall_available = True
+            _thrall_source = "plugin_dir"
+
+    if thrall_available:
+        os.environ["THRALL_AVAILABLE"] = "true"
+        log.info("Thrall detected (source: %s) — local triage + heartbeat routing enabled", _thrall_source)
+    else:
+        log.info("Thrall not detected — using standard LLM pipeline")
 
     # LLM router — supports two modes:
     #   1. LLM_MODEL (provider-agnostic via LiteLLM): LLM_MODEL, LLM_API_KEY, LLM_API_BASE

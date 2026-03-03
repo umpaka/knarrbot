@@ -1324,8 +1324,29 @@ class AgentCore:
         """Execute a heartbeat check. Returns True if nothing to report."""
         import os as _os
         log.info("Heartbeat firing for chat %d", chat_id)
-        # Use FAST_LLM_MODEL for heartbeats if configured — saves cost on frequent cycles
+
         fast_model = _os.environ.get("FAST_LLM_MODEL", "")
+        thrall_available = _os.environ.get("THRALL_AVAILABLE", "").lower() in ("true", "1", "yes")
+
+        # When Thrall is present and no explicit FAST_LLM_MODEL is set,
+        # attempt a lightweight heartbeat via the thrall-chat-lite skill.
+        # Falls back to the standard LLM router on any failure.
+        if thrall_available and not fast_model:
+            try:
+                reply = await self._thrall_heartbeat(chat_id, instructions)
+                if reply is not None:
+                    if reply.strip().upper() not in ("HEARTBEAT_OK", "NO_REPLY"):
+                        try:
+                            await self.send(chat_id, f"[Heartbeat]\n\n{reply}")
+                        except Exception:
+                            log.exception("Failed to deliver thrall heartbeat to chat %d", chat_id)
+                        log.info("Thrall heartbeat produced output")
+                        return False
+                    log.info("Thrall heartbeat: nothing to report")
+                    return True
+            except Exception:
+                log.info("Thrall heartbeat failed, falling back to standard LLM")
+
         try:
             if self.llm_router:
                 prompt = (
@@ -1353,6 +1374,37 @@ class AgentCore:
                 else:
                     log.info("Heartbeat: nothing to report")
                     return True
-        except Exception as e:
+        except Exception:
             log.exception("Error executing heartbeat")
         return False
+
+    async def _thrall_heartbeat(self, chat_id: int, instructions: str) -> str | None:
+        """Attempt heartbeat via thrall-chat-lite knarr skill (zero API cost).
+
+        Returns the reply string on success, or None if the skill is
+        unavailable / fails (caller should fall back to standard LLM).
+        """
+        try:
+            result = await self.client.execute(
+                skill="thrall-chat-lite",
+                input_data={
+                    "action": "chat",
+                    "prompt": (
+                        f"[HEARTBEAT] Execute standing instructions.\n\n"
+                        f"Write current state to vault scratch/current-thinking, "
+                        f"then respond HEARTBEAT_OK if nothing to report.\n\n{instructions}"
+                    ),
+                    "chat_id": str(chat_id),
+                },
+                local=True,
+                timeout=60,
+            )
+            if result.get("status") == "completed":
+                output = result.get("output_data", {})
+                reply = output.get("response", output.get("text", ""))
+                if reply:
+                    log.info("Thrall heartbeat completed (skill: thrall-chat-lite)")
+                    return reply
+        except Exception as e:
+            log.debug("thrall-chat-lite skill unavailable: %s", e)
+        return None
