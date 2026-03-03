@@ -1693,6 +1693,13 @@ async def main() -> None:
         "goals/active.md":    "starter goals (Step 0 finds nothing to work on)",
         "scratch/":           "scratch directory (Step 7 write will fail on first cycle)",
     }
+    # Also check core/ files that are loaded from the knarrbot install dir
+    _core_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "core")
+    _policy_path = os.path.normpath(os.path.join(_core_dir, "POLICY.md"))
+    if not os.path.exists(_policy_path):
+        _vault_missing.append(
+            f"  MISSING core/POLICY.md — economic policy absent from system prompt"
+        )
     _vault_missing: list[str] = []
     for _rel, _desc in _vault_checks.items():
         _full = os.path.join(_vault_root_check, "default", _rel)
