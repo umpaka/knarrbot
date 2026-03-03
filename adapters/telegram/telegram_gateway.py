@@ -978,6 +978,36 @@ async def heartbeat_loop(
 
 # ── Economy watch loop ────────────────────────────────────────────
 
+def _lookup_peer_name(vault_root: str, node_id: str) -> str:
+    """Try to find a human name for a node_id from vault contacts.
+
+    Scans contacts/ directory for files whose YAML frontmatter contains
+    a matching node_id field. Returns the contact name or empty string.
+    """
+    if not node_id:
+        return ""
+    contacts_dir = os.path.join(vault_root, "default", "contacts")
+    if not os.path.isdir(contacts_dir):
+        return ""
+    try:
+        for fname in os.listdir(contacts_dir):
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(contacts_dir, fname)
+            try:
+                with open(fpath) as f:
+                    content = f.read(1024)  # only need frontmatter
+                # Check if node_id appears in this file
+                if node_id[:16] in content or node_id in content:
+                    # Return filename without extension as the contact name
+                    return fname[:-3].replace("-", " ").replace("_", " ").title()
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return ""
+
+
 async def economy_watch_loop(
     knarr_client: KnarrClient,
     send_fn: Any,
@@ -989,7 +1019,6 @@ async def economy_watch_loop(
     Appends every balance change to vault economy/ledger.md so the agent has
     a full transaction history to reason about.
     """
-    import re as _re
     from datetime import datetime as _dt
 
     log.info("Starting economy watch loop (interval=%ds)", interval)
@@ -1005,64 +1034,119 @@ async def economy_watch_loop(
             if not econ:
                 continue
 
-            # Navigate whatever structure /economy returns
             summary = econ.get("summary", {}) or {}
             net = float(summary.get("net_position", 0) or 0)
+            balance = float(summary.get("balance", net) or net)
             peers = econ.get("peers", econ.get("positions", [])) or []
 
-            # Detect balance change
-            if _prev_net is not None and net != _prev_net:
-                delta = net - _prev_net
-                ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            # Build current peer map
+            current_peers: dict[str, float] = {}
+            if isinstance(peers, list):
+                for p in peers:
+                    if not isinstance(p, dict):
+                        continue
+                    nid = p.get("node_id", p.get("peer", ""))
+                    bal = float(p.get("balance", p.get("position", 0)) or 0)
+                    if nid:
+                        current_peers[nid] = bal
 
-                # Find who changed — compare per-peer positions
-                earner_desc = ""
-                if isinstance(peers, list):
-                    for p in peers:
-                        nid = p.get("node_id", p.get("peer", ""))
-                        bal = float(p.get("balance", p.get("position", 0)) or 0)
-                        prev_bal = _prev_peers.get(nid, 0.0)
-                        if abs(bal - prev_bal) > 0.01:
-                            short = nid[:16] if nid else "unknown"
-                            earner_desc += f" (peer {short}… Δ{bal - prev_bal:+.1f})"
-                    _prev_peers = {
-                        p.get("node_id", p.get("peer", "")): float(
-                            p.get("balance", p.get("position", 0)) or 0
-                        )
-                        for p in peers
-                        if isinstance(p, dict)
-                    }
+            # On first poll: initialise baseline silently, no notification
+            if _prev_net is None:
+                _prev_net = net
+                _prev_peers = current_peers
+                continue
 
-                # Append to vault ledger
-                os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
-                if not os.path.exists(_ledger_path):
-                    with open(_ledger_path, "w") as _lf:
-                        _lf.write("# Economy Ledger\n\n")
-                with open(_ledger_path, "a") as _lf:
-                    _lf.write(f"- {ts} | net: {net:+.2f} | delta: {delta:+.2f}{earner_desc}\n")
+            if net == _prev_net:
+                _prev_peers = current_peers
+                continue
 
-                # Notify owner when earning credits
-                if delta > 0:
-                    notify_chat = 0
-                    if chat_store:
-                        active = chat_store.get_active_chats(time.time() - 86400 * 7)
-                        if active:
-                            notify_chat = active[0]["chat_id"]
-                    if notify_chat and send_fn:
-                        msg = (
-                            f"💰 **+{delta:.1f} credit{'s' if delta != 1 else ''} earned**"
-                            f"{earner_desc}\n"
-                            f"Net position: `{net:+.2f}` | Logged to `economy/ledger.md`"
-                        )
-                        try:
-                            await send_fn(notify_chat, msg)
-                        except Exception:
-                            pass
-                    log.info("Economy: earned %.1f credits (net=%.2f)%s", delta, net, earner_desc)
+            delta = net - _prev_net
+            ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+            # Split peer changes into earners (they paid us) and spenders (we paid them)
+            earners: list[tuple[str, float]] = []   # (node_id, positive_delta)
+            total_spent: float = 0.0
+            spend_count: int = 0
+
+            for nid, bal in current_peers.items():
+                prev_bal = _prev_peers.get(nid, 0.0)
+                peer_delta = bal - prev_bal
+                if abs(peer_delta) < 0.01:
+                    continue
+                if peer_delta > 0:
+                    earners.append((nid, peer_delta))
                 else:
-                    log.info("Economy: spent %.1f credits (net=%.2f)", abs(delta), net)
+                    total_spent += abs(peer_delta)
+                    spend_count += 1
+
+            # Also catch new peers that weren't in _prev_peers
+            for nid, prev_bal in _prev_peers.items():
+                if nid not in current_peers:
+                    peer_delta = 0 - prev_bal
+                    if peer_delta > 0.01:
+                        earners.append((nid, peer_delta))
+                    elif peer_delta < -0.01:
+                        total_spent += abs(peer_delta)
+                        spend_count += 1
+
+            # Build ledger line (full detail for agent reasoning)
+            earner_detail = " ".join(
+                f"(+{d:.1f} from {nid[:16]}…)" for nid, d in earners
+            )
+            spender_detail = f"(spent {total_spent:.1f} across {spend_count} peers)" if spend_count else ""
+            ledger_line = (
+                f"- {ts} | net: {net:+.2f} | delta: {delta:+.2f}"
+                f"{' | earned: ' + earner_detail if earner_detail else ''}"
+                f"{' | ' + spender_detail if spender_detail else ''}\n"
+            )
+            os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+            if not os.path.exists(_ledger_path):
+                with open(_ledger_path, "w") as _lf:
+                    _lf.write("# Economy Ledger\n\n")
+            with open(_ledger_path, "a") as _lf:
+                _lf.write(ledger_line)
+
+            # Notify owner — only for meaningful earning events
+            if delta > 0.5 and earners:
+                notify_chat = 0
+                if chat_store:
+                    active = chat_store.get_active_chats(time.time() - 86400 * 7)
+                    if active:
+                        notify_chat = active[0]["chat_id"]
+
+                if notify_chat and send_fn:
+                    # Build earner list with contact names where available
+                    earner_parts = []
+                    for nid, d in sorted(earners, key=lambda x: -x[1])[:3]:
+                        name = _lookup_peer_name(_vault_root, nid)
+                        label = name if name else f"{nid[:8]}…"
+                        earner_parts.append(f"{label} (+{d:.0f})")
+
+                    earner_str = ", ".join(earner_parts)
+                    spend_str = (
+                        f"\nSpent {total_spent:.0f} credits on {spend_count} services this cycle."
+                        if total_spent > 0.5 else ""
+                    )
+                    net_cycle = delta - total_spent if total_spent < delta else delta
+                    balance_str = f"{balance:+.0f}" if balance != net else f"{net:+.0f}"
+
+                    msg = (
+                        f"💰 Earned **{delta:.0f} credits** from {earner_str}"
+                        f"{spend_str}\n"
+                        f"Balance: `{balance_str}` | logged"
+                    )
+                    try:
+                        await send_fn(notify_chat, msg)
+                    except Exception:
+                        pass
+
+                log.info("Economy: earned %.1f credits (net=%.2f) from %d peer(s)",
+                         delta, net, len(earners))
+            elif delta < 0:
+                log.info("Economy: spent %.1f credits (net=%.2f)", abs(delta), net)
 
             _prev_net = net
+            _prev_peers = current_peers
 
         except Exception:
             log.debug("Economy watch error (non-fatal)", exc_info=True)
