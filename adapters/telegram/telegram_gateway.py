@@ -1684,6 +1684,29 @@ async def main() -> None:
         bot_info={"start_time": start_time, "bot_username": ""},
     )
 
+    # ── Vault health check ───────────────────────────────────────────
+    # Warn clearly at startup if vault structure is incomplete so problems
+    # surface in logs immediately rather than silently degrading behaviour.
+    _vault_root_check = os.environ.get("VAULT_ROOT", "/opt/knarr-vault")
+    _vault_checks = {
+        "goals/heartbeat.md": "heartbeat protocol (agent runs old static fallback)",
+        "goals/active.md":    "starter goals (Step 0 finds nothing to work on)",
+        "scratch/":           "scratch directory (Step 7 write will fail on first cycle)",
+    }
+    _vault_missing: list[str] = []
+    for _rel, _desc in _vault_checks.items():
+        _full = os.path.join(_vault_root_check, "default", _rel)
+        if not os.path.exists(_full):
+            _vault_missing.append(f"  MISSING {_rel} — {_desc}")
+    if _vault_missing:
+        log.warning(
+            "Vault structure incomplete — heartbeat will degrade silently:\n%s\n"
+            "  Fix: cp -r vault-templates/. %s/default/",
+            "\n".join(_vault_missing), _vault_root_check,
+        )
+    else:
+        log.info("Vault structure OK (%s/default/)", _vault_root_check)
+
     # Assemble concurrent tasks
     tasks: list = [poll_loop(token)]
 

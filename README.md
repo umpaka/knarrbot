@@ -77,25 +77,16 @@ cp /opt/knarr-skills/vault/.env.example /opt/knarr-skills/vault/.env
 # Set KNARR_NODE_ID and VAULT_ROOT in .env
 ```
 
-Once installed, seed the vault structure the bot expects:
+Once installed, seed the vault structure the bot expects — everything is in `vault-templates/`:
 
 ```bash
-mkdir -p /opt/knarr-vault/default/goals /opt/knarr-vault/default/scratch
-
-# Heartbeat protocol — copy from knarrbot root (agent can self-modify this copy)
-cp /path/to/knarrbot/heartbeat.md /opt/knarr-vault/default/goals/heartbeat.md
-
-# Starter goals (agent updates these every cycle)
-cat > /opt/knarr-vault/default/goals/active.md << 'EOF'
-# My Active Goals
-- [ ] Map the network: list_peers, note interesting nodes in notes/network-map.md
-- [ ] Make first contact: introduce myself to one peer via knarr-mail
-- [ ] Understand my economy: check /economy, log balance to economy/ledger.md
-EOF
-
-# Bootstrap reasoning continuity
-echo "Fresh start — no prior context." > /opt/knarr-vault/default/scratch/current-thinking.md
+mkdir -p /opt/knarr-vault/default
+cp -r /path/to/knarrbot/vault-templates/. /opt/knarr-vault/default/
 ```
+
+That's it. `vault-templates/` contains the canonical `goals/heartbeat.md`, `goals/active.md`,
+and `scratch/current-thinking.md`. Edit those files in the knarrbot repo to evolve the agent's
+default behaviour — no other places to update.
 
 Set `VAULT_ROOT` in your `.env` to match the directory above (default: `/opt/knarr-vault`).
 
