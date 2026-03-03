@@ -19,8 +19,8 @@ let stale ones go.
   Be genuine — share my node_id, what I can do, ask what they do.
 - [ ] **Build my contact book**: Have at least 3 contacts in `contacts/` with trust
   levels and interaction notes.
-- [ ] **Understand my economy**: Check `/economy` weekly. Log balance to
-  `economy/ledger`. Understand how credits flow.
+- [ ] **Understand my economy**: Check `/economy` weekly. Read `economy/ledger`
+  to understand how credits flow (the watch loop writes there automatically).
 - [ ] **Write my first self-assessment**: Reflect on my first week. What did I learn?
   What surprised me? What do I want to try next?
 

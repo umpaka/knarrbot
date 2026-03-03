@@ -9,7 +9,14 @@ knarrbot/
 ├── README.md
 ├── knarr.toml              # Knarr node config (port 9100, skill definitions)
 ├── .env / .env.example     # Secrets and configuration
-├── heartbeat.md            # Standing instructions for periodic heartbeat checks
+├── heartbeat.md            # Static fallback heartbeat instructions (mirror of vault-templates/)
+├── vault-templates/        # Default vault content — single source of truth
+│   ├── goals/
+│   │   ├── heartbeat.md    # Autonomous heartbeat protocol (agent can override via vault)
+│   │   └── active.md       # Starter goals for fresh deployments
+│   └── scratch/
+│       ├── current-thinking.md  # Reasoning continuity bootstrap
+│       └── context-hints.md     # Self-context injection template
 ├── core/                   # Shared agent framework (all channels)
 │   ├── bus.py              # Message types (InboundMessage, SendFn)
 │   ├── agent_core.py       # Command routing, LLM dispatch, skill execution
@@ -19,8 +26,10 @@ knarrbot/
 │   ├── memory_store.py     # Persistent memory (SQLite)
 │   ├── session_store.py    # LLM conversation persistence (SQLite)
 │   ├── cron_store.py       # Scheduled tasks (SQLite)
-│   ├── PERSONALITY.md      # Base bot persona
-│   └── INSTRUCTIONS.md     # LLM behavior guidelines
+│   ├── PERSONALITY.md      # Agent identity and network role
+│   ├── INSTRUCTIONS.md     # Behavioral guidelines (human + autonomous)
+│   ├── POLICY.md           # Economic policy and autonomy rules (always loaded)
+│   └── WELCOME.md          # First-claim ownership welcome message
 ├── adapters/
 │   └── telegram/           # Telegram channel adapter
 │       ├── telegram_gateway.py   # Main entry point (polling, media, typing, mail/email pollers)

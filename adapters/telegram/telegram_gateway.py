@@ -1117,8 +1117,9 @@ async def economy_watch_loop(
 
             # Notify owner — only for meaningful earning events
             if delta > 0.5 and earners:
-                notify_chat = 0
-                if chat_store:
+                # Re-read HEARTBEAT_CHAT_ID each cycle — ownership claim may have set it
+                notify_chat = int(os.environ.get("HEARTBEAT_CHAT_ID", "0"))
+                if not notify_chat and chat_store:
                     active = chat_store.get_active_chats(time.time() - 86400 * 7)
                     if active:
                         notify_chat = active[0]["chat_id"]
@@ -1189,9 +1190,6 @@ async def mail_poll_loop(
     except Exception:
         pass
 
-    # Determine notification chat: use HEARTBEAT_CHAT_ID or auto-discover
-    notify_chat_id = int(os.environ.get("HEARTBEAT_CHAT_ID", "0"))
-
     while True:
         try:
             await asyncio.sleep(mail_poll_interval)
@@ -1214,8 +1212,8 @@ async def mail_poll_loop(
                 except (TypeError, ValueError):
                     pass
 
-            # Determine target chat for notifications
-            target_chat = notify_chat_id
+            # Determine target chat — re-read each cycle so dynamic ownership claim is picked up
+            target_chat = int(os.environ.get("HEARTBEAT_CHAT_ID", "0"))
             if not target_chat and chat_store:
                 active = chat_store.get_active_chats(time.time() - 86400)
                 if active:
@@ -1694,13 +1692,13 @@ async def main() -> None:
         "scratch/":           "scratch directory (Step 7 write will fail on first cycle)",
     }
     # Also check core/ files that are loaded from the knarrbot install dir
+    _vault_missing: list[str] = []
     _core_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "core")
     _policy_path = os.path.normpath(os.path.join(_core_dir, "POLICY.md"))
     if not os.path.exists(_policy_path):
         _vault_missing.append(
-            f"  MISSING core/POLICY.md — economic policy absent from system prompt"
+            "  MISSING core/POLICY.md — economic policy absent from system prompt"
         )
-    _vault_missing: list[str] = []
     for _rel, _desc in _vault_checks.items():
         _full = os.path.join(_vault_root_check, "default", _rel)
         if not os.path.exists(_full):
