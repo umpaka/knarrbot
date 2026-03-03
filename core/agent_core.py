@@ -1306,9 +1306,14 @@ class AgentCore:
         try:
             if self.llm_router:
                 prompt = (
-                    f"[HEARTBEAT] The following are your standing instructions. "
-                    f"Execute them now. If there is nothing actionable, respond with "
-                    f"just the word HEARTBEAT_OK and nothing else.\n\n{instructions}"
+                    f"[HEARTBEAT] Execute your standing instructions now.\n\n"
+                    f"MANDATORY FINAL STEP: Before you may respond HEARTBEAT_OK, you must "
+                    f"write your current state to the vault: "
+                    f"knowledge_vault action=write vault=default path=scratch/current-thinking "
+                    f"— recording what you just did, what you found, and what your next action is. "
+                    f"This write is required every single cycle without exception.\n\n"
+                    f"Only after completing that write, if there is nothing to report to the owner, "
+                    f"respond with just the word HEARTBEAT_OK and nothing else.\n\n{instructions}"
                 )
                 reply = await self.llm_router.route_message(
                     self.client, chat_id, prompt,

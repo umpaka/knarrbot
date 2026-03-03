@@ -812,8 +812,6 @@ async def heartbeat_loop(
 
     # Track when we last processed each chat
     last_heartbeat_time: dict[int, float] = {}
-    # Chats where last heartbeat was OK — skip LLM if bot silent since
-    last_ok_time: dict[int, float] = {}
     # Track last health alert to avoid spamming (only alert once per issue)
     _last_health_issues: set[str] = set()
     # Current sleep duration — can be overridden per-cycle by agent
@@ -918,28 +916,6 @@ async def heartbeat_loop(
                 msg_count = chat_info["msg_count"]
                 chat_title = chat_info["chat_title"]
 
-                # Skip LLM if bot silent since last HEARTBEAT_OK
-                ok_since = last_ok_time.get(chat_id, 0)
-                if ok_since > 0 and _agent and getattr(getattr(_agent, "llm_router", None), "session_store", None):
-                    try:
-                        import sqlite3 as _sq
-                        _conn = _sq.connect(_agent.llm_router.session_store.db_path)
-                        _row = _conn.execute(
-                            "SELECT COUNT(*) FROM session_turns "
-                            "WHERE chat_id = ? AND role = 'model' AND created_at > ?",
-                            (chat_id, ok_since),
-                        ).fetchone()
-                        _conn.close()
-                        _bot_turns = _row[0] if _row else 0
-                    except Exception:
-                        _bot_turns = 1
-                    if _bot_turns == 0:
-                        log.debug(
-                            "Heartbeat skip chat %d (%s) — bot silent since last OK",
-                            chat_id, chat_title,
-                        )
-                        continue
-
                 log.info(
                     "Heartbeat firing for chat %d (%s) — %d new messages",
                     chat_id, chat_title, msg_count,
@@ -950,6 +926,10 @@ async def heartbeat_loop(
                 # We prepend it so the next cycle picks up mid-thought.
                 _scratch_path = os.path.join(
                     _vault_root, "default", "scratch", "current-thinking.md"
+                )
+                # Record mtime BEFORE heartbeat so we can detect if Step 7 actually ran
+                _thinking_mtime_before = (
+                    os.path.getmtime(_scratch_path) if os.path.exists(_scratch_path) else 0.0
                 )
                 enriched_instructions = instructions
                 try:
@@ -967,10 +947,31 @@ async def heartbeat_loop(
                 except Exception:
                     pass  # Non-critical — proceed without scratch context
 
-                was_ok = await _agent.execute_heartbeat(chat_id, enriched_instructions)
+                await _agent.execute_heartbeat(chat_id, enriched_instructions)
                 last_heartbeat_time[chat_id] = time.time()
-                if was_ok:
-                    last_ok_time[chat_id] = time.time()
+
+                # ── Step 7 code-level guarantee ──
+                # If the LLM took the HEARTBEAT_OK shortcut without writing its thinking,
+                # fire a mandatory write-only follow-up. Continuity is never optional.
+                _thinking_mtime_after = (
+                    os.path.getmtime(_scratch_path) if os.path.exists(_scratch_path) else 0.0
+                )
+                if _thinking_mtime_after <= _thinking_mtime_before:
+                    log.info(
+                        "Heartbeat Step 7 not completed — enforcing current-thinking write "
+                        "for chat %d", chat_id,
+                    )
+                    _step7_prompt = (
+                        "MANDATORY — you did not write your current thinking this cycle.\n\n"
+                        "Use knowledge_vault (action=write, vault=default, "
+                        "path=scratch/current-thinking) to record:\n"
+                        "• What you just did this cycle\n"
+                        "• What you found or learned\n"
+                        "• Your next intended action\n"
+                        "• Any open questions or blockers\n\n"
+                        "Do this now. Then respond HEARTBEAT_OK."
+                    )
+                    await _agent.execute_heartbeat(chat_id, _step7_prompt)
 
         except Exception:
             log.exception("Error in heartbeat loop")
