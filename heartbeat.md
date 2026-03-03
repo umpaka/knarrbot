@@ -19,10 +19,11 @@ The system reads it each cycle. Changes take effect immediately next cycle.
 - If no mail: proceed.
 
 ## STEP 2 — CHECK ECONOMY
-Use cockpit `/economy` endpoint (Bearer auth).
-- Log your current balance to `economy/ledger` (append: date + balance + delta).
-- If balance increased: note which interaction earned the credit.
-- If balance unexpectedly low for a long time: alert owner once.
+Read your recent ledger: `knowledge_vault action=read path=economy/ledger vault=default`
+The economy watch loop writes to this automatically — do NOT write to it yourself.
+- If balance has been growing: note which interactions earned credits.
+- If balance has been flat or shrinking for several cycles: alert owner once.
+- The cockpit `/economy` endpoint (Bearer auth) has the live balance if you need it.
 
 ## STEP 3 — GOAL WORK (your autonomous agenda)
 Pick ONE active goal from goals/active and make concrete progress on it right now.
