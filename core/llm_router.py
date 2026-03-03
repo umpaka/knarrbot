@@ -761,6 +761,132 @@ def get_system_prompt(base_dir: str | None = None) -> str:
 SYSTEM_PROMPT = get_system_prompt()
 
 
+# ── Human-readable tool status descriptions ─────────────────────────────
+
+def _human_tool_desc(name: str, args: dict, consecutive_errors: dict | None = None) -> str:
+    """Return a short human-readable description of a tool call for status messages.
+
+    Returns empty string for tools that should be silent.
+    """
+    import json as _json
+    from urllib.parse import urlparse as _urlparse
+
+    is_retry = bool(consecutive_errors and consecutive_errors.get(
+        f"{name}:{args.get('url', '')}", 0) > 0)
+    prefix = "retrying: " if is_retry else ""
+
+    # ── Local / meta tools ──────────────────────────────────────────────
+    if name == "run_parallel":
+        calls_raw = args.get("calls_json", "")
+        try:
+            calls = _json.loads(calls_raw) if calls_raw else []
+            parts = [_human_tool_desc(c.get("skill", ""), c.get("args", {})) for c in calls]
+            parts = [p for p in parts if p]
+            if parts:
+                combined = " + ".join(parts[:3])
+                if len(parts) > 3:
+                    combined += f" +{len(parts) - 3}"
+                return f"{prefix}{combined}"
+        except Exception:
+            pass
+        return f"{prefix}parallel tasks"
+
+    if name == "list_scheduled_tasks":
+        return f"{prefix}checking schedule"
+    if name in ("get_chat_history",):
+        return ""  # silent
+    if name == "search_skills":
+        q = args.get("query", "")
+        return f"{prefix}looking for skills{': ' + q[:40] if q else ''}"
+
+    # ── Knowledge vault ─────────────────────────────────────────────────
+    if name in ("knowledge_vault", "knowledge-vault"):
+        action = args.get("action", "")
+        path = args.get("path", "")
+        _ACTION_MAP = {
+            "read": "reading vault", "write": "writing vault",
+            "append": "updating vault", "search": "searching vault",
+            "list": "listing vault", "stats": "checking vault",
+            "query": "querying vault", "delete": "deleting from vault",
+        }
+        label = _ACTION_MAP.get(action, f"vault: {action}" if action else "vault")
+        return f"{prefix}{label}{': ' + path if path else ''}"
+
+    # ── Knarr mail ──────────────────────────────────────────────────────
+    if name in ("knarr_mail", "knarr-mail"):
+        action = args.get("action", "")
+        _MAIL_MAP = {
+            "poll": "checking inbox", "send": "sending kmail",
+            "list_peers": "checking peers", "read": "reading kmail",
+        }
+        return f"{prefix}{_MAIL_MAP.get(action, 'knarr mail: ' + action)}"
+
+    # ── Web / fetch ──────────────────────────────────────────────────────
+    if name == "web_search":
+        q = args.get("query", "")
+        return f"{prefix}searching \"{q[:50]}\"" if q else f"{prefix}web search"
+
+    if name == "fetch_url":
+        url = args.get("url", "")
+        # Cockpit API endpoints
+        _COCKPIT = {"/economy": "checking economy", "/status": "checking node status",
+                    "/peers": "checking peers", "/skills": "checking skills",
+                    "/mail": "checking inbox"}
+        try:
+            parsed = _urlparse(url)
+            for endpoint, label in _COCKPIT.items():
+                if parsed.path.endswith(endpoint):
+                    return f"{prefix}{label}"
+            netloc = parsed.netloc or url[:40]
+            return f"{prefix}reading {netloc}"
+        except Exception:
+            return f"{prefix}fetching url"
+
+    if name == "browse_web":
+        url = args.get("url", "")
+        try:
+            netloc = _urlparse(url).netloc or url[:40]
+            return f"{prefix}browsing {netloc}"
+        except Exception:
+            return f"{prefix}browsing"
+
+    # ── Agora ────────────────────────────────────────────────────────────
+    if name == "agora":
+        action = args.get("action", "")
+        _AGORA_MAP = {
+            "feed": "browsing task board", "post": "posting to Agora",
+            "reply": "replying on Agora", "search": "searching Agora",
+            "my_contracts": "checking contracts", "reputation": "checking reputation",
+            "user_posts": "reading posts", "timeline": "reading timeline",
+            "get_post": "reading post",
+        }
+        return f"{prefix}{_AGORA_MAP.get(action, 'agora: ' + action)}"
+
+    # ── Image generation ─────────────────────────────────────────────────
+    if "generate" in name and "image" in name:
+        return f"{prefix}generating image"
+
+    # ── Document / PDF ───────────────────────────────────────────────────
+    if name in ("document-publisher", "document_publisher"):
+        return f"{prefix}generating document"
+
+    # ── Clawknarr / network status ───────────────────────────────────────
+    if "status" in name:
+        return f"{prefix}checking network status"
+    if "thrall" in name:
+        action = args.get("action", "")
+        return f"{prefix}running local model{': ' + action if action else ''}"
+
+    # ── Generic fallback: show label + first meaningful arg ──────────────
+    hint = ""
+    for key in ("query", "task", "prompt", "text", "message"):
+        if args.get(key):
+            hint = str(args[key])[:50]
+            break
+    label = name.replace("_", " ").replace("-", " ")
+    return f"{prefix}{label}{': ' + hint if hint else ''}"
+
+
 # ── Schema-aware argument validation ────────────────────────────────────
 
 def _validate_args(
@@ -3354,8 +3480,22 @@ class LLMRouter:
                 try:
                     _status = await client.get_status()
                     advertise = _status.get("advertise_host", "")
+                    _local_node_id = _status.get("node_id", "")
+                    _local_port = _status.get("port", 0)
                 except Exception:
                     advertise = ""
+                    _local_node_id = ""
+                    _local_port = 0
+                # Private skills advertise port=0 on the DHT to prevent external
+                # routing. For the local node, substitute the real port so we
+                # correctly prefer our own instance over network peers.
+                if _local_node_id and _local_port:
+                    for _r in results:
+                        if _r.get("port", 0) == 0 and _r.get("node_id") == _local_node_id:
+                            _r["host"] = "127.0.0.1"
+                            _r["port"] = _local_port
+                            log.debug("Fixed port=0 → 127.0.0.1:%s for local provider %s",
+                                      _local_port, _local_node_id[:12])
                 local_hosts = {"127.0.0.1", "localhost", advertise}
                 local_hosts.discard("")
                 results = self._score_providers(results, func_name, local_hosts)
@@ -4253,32 +4393,15 @@ class LLMRouter:
                     if fc.name in _SILENT_TOOLS:
                         continue
                     args = dict(fc.args) if fc.args else {}
-                    if fc.name == "web_search" and args.get("query"):
-                        tool_descs.append(f"searching \"{args['query']}\"")
-                    elif fc.name == "fetch_url" and args.get("url"):
-                        from urllib.parse import urlparse
-                        tool_descs.append(f"reading {urlparse(args['url']).netloc}")
-                    else:
-                        # For external/unknown skills: show a descriptive hint from args
-                        hint = ""
-                        for key in ("url", "query", "task", "prompt", "text"):
-                            if args.get(key):
-                                hint = str(args[key])[:60]
-                                break
-                        label = fc.name.replace("_", "-")
-                        # Detect retry: same skill name appeared in previous round
-                        ekey = _error_key(fc.name, args)
-                        is_retry = consecutive_errors.get(ekey, 0) > 0
-                        desc = f"{label}: {hint}" if hint else label
-                        if is_retry:
-                            desc = f"retrying {desc}"
+                    desc = _human_tool_desc(fc.name, args, consecutive_errors)
+                    if desc:
                         tool_descs.append(desc)
                 if tool_descs:
                     visible_step += 1
                     summary = ", ".join(tool_descs[:3])
                     if len(tool_descs) > 3:
-                        summary += f" (+{len(tool_descs) - 3} more)"
-                    await status_fn(f"[Step {visible_step}] {summary}")
+                        summary += f" +{len(tool_descs) - 3} more"
+                    await status_fn(f"Working... {summary}")
 
             contents.append(model_content)
             function_response_parts = []
@@ -4488,30 +4611,15 @@ class LLMRouter:
                         tc_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                     except json.JSONDecodeError:
                         tc_args = {}
-                    if tc.function.name == "web_search" and tc_args.get("query"):
-                        tool_descs.append(f"searching \"{tc_args['query']}\"")
-                    elif tc.function.name == "fetch_url" and tc_args.get("url"):
-                        from urllib.parse import urlparse
-                        tool_descs.append(f"reading {urlparse(tc_args['url']).netloc}")
-                    else:
-                        hint = ""
-                        for key in ("url", "query", "task", "prompt", "text"):
-                            if tc_args.get(key):
-                                hint = str(tc_args[key])[:60]
-                                break
-                        label = tc.function.name.replace("_", "-")
-                        ekey = _error_key(tc.function.name, tc_args)
-                        is_retry = consecutive_errors.get(ekey, 0) > 0
-                        desc = f"{label}: {hint}" if hint else label
-                        if is_retry:
-                            desc = f"retrying {desc}"
+                    desc = _human_tool_desc(tc.function.name, tc_args, consecutive_errors)
+                    if desc:
                         tool_descs.append(desc)
                 if tool_descs:
                     visible_step += 1
                     summary = ", ".join(tool_descs[:3])
                     if len(tool_descs) > 3:
-                        summary += f" (+{len(tool_descs) - 3} more)"
-                    await status_fn(f"[Step {visible_step}] {summary}")
+                        summary += f" +{len(tool_descs) - 3} more"
+                    await status_fn(f"Working... {summary}")
 
             messages.append(msg.model_dump())
 
