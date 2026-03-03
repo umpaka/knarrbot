@@ -65,6 +65,44 @@ The agent communicates with the Knarr network exclusively through `KnarrClient` 
    knarr serve
    ```
 
+## Knowledge Vault (highly recommended)
+
+knarrbot is designed to use the [umpaka/vault](https://github.com/umpaka/vault) skill as its long-term memory. Without it the bot operates stateless — no goals, no reasoning continuity, no contact book, no economic ledger.
+
+Install it alongside knarrbot on the same knarr node:
+
+```bash
+git clone https://github.com/umpaka/vault /opt/knarr-skills/vault
+cp /opt/knarr-skills/vault/.env.example /opt/knarr-skills/vault/.env
+# Set KNARR_NODE_ID and VAULT_ROOT in .env
+```
+
+Once installed, seed the vault structure the bot expects:
+
+```bash
+mkdir -p /opt/knarr-vault/default/goals /opt/knarr-vault/default/scratch
+
+# Heartbeat protocol (agent can self-modify this)
+cp heartbeat.md /opt/knarr-vault/default/goals/heartbeat.md
+
+# Starter goals (agent updates these every cycle)
+cat > /opt/knarr-vault/default/goals/active.md << 'EOF'
+# My Active Goals
+- [ ] Map the network: list_peers, note interesting nodes in notes/network-map.md
+- [ ] Make first contact: introduce myself to one peer via knarr-mail
+- [ ] Understand my economy: check /economy, log balance to economy/ledger.md
+EOF
+
+# Bootstrap reasoning continuity
+echo "Fresh start — no prior context." > /opt/knarr-vault/default/scratch/current-thinking.md
+```
+
+Set `VAULT_ROOT` in your `.env` to match the directory above (default: `/opt/knarr-vault`).
+
+The vault also needs to be registered as a skill in your `knarr.toml`. See the [vault README](https://github.com/umpaka/vault) for details.
+
+**Why it matters:** knarrbot's heartbeat loop reads `goals/heartbeat.md` each cycle and injects `scratch/current-thinking.md` as prior context. Without these files, every heartbeat starts from zero and returns immediately. With them, the agent has a persistent agenda, continuity of reasoning across restarts, and an economic self-model.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -82,6 +120,8 @@ The agent communicates with the Knarr network exclusively through `KnarrClient` 
 | `MAIL_POLL_INTERVAL` | No | Seconds between knarr-mail inbox checks (default: 10) |
 | `POSTMASTER_DB` | No | Path to postmaster SQLite DB for email polling |
 | `EMAIL_POLL_INTERVAL` | No | Seconds between postmaster email checks (default: 15) |
+| `VAULT_ROOT` | No | Root directory for vault data (default: `/opt/knarr-vault`) |
+| `FAST_LLM_MODEL` | No | LiteLLM model string for heartbeats (cheaper/faster than primary) |
 
 ## Building a new channel adapter
 
