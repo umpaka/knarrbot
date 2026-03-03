@@ -1657,11 +1657,15 @@ class LLMRouter:
         """
         now = time.time()
 
-        # Filter blocklisted providers
+        # Filter blocklisted providers and unreachable entries (port=0)
         filtered = []
         for r in results:
             nid = r.get("node_id", "")
             skill_name = self._name_map.get(func_name, func_name.replace("_", "-"))
+            if r.get("port", 0) == 0:
+                log.debug("Skipping provider %s for '%s' — port=0 (private/unadvertised)",
+                          nid[:12], skill_name)
+                continue
             bkey = f"{nid}:{skill_name}"
             block_until = self._provider_blocklist.get(bkey, 0)
             if block_until > now:
