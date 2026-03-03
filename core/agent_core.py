@@ -115,6 +115,28 @@ def save_owner(user_id: int):
         log.exception("Failed to save owner.json")
 
 
+def _set_heartbeat_chat(chat_id: int) -> None:
+    """Pin the heartbeat to the owner's DM chat.
+
+    Sets HEARTBEAT_CHAT_ID in the live process env so background loops
+    pick it up immediately, and appends it to .env so it survives restarts.
+    Called once when ownership is claimed.
+    """
+    os.environ["HEARTBEAT_CHAT_ID"] = str(chat_id)
+    env_path = os.path.join(_DATA_DIR, ".env")
+    try:
+        lines: list[str] = []
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                lines = [l for l in f.readlines() if not l.startswith("HEARTBEAT_CHAT_ID=")]
+        lines.append(f"HEARTBEAT_CHAT_ID={chat_id}\n")
+        with open(env_path, "w") as f:
+            f.writelines(lines)
+        log.info("Heartbeat pinned to owner DM chat %d", chat_id)
+    except Exception:
+        log.exception("Failed to persist HEARTBEAT_CHAT_ID to .env (live env still set)")
+
+
 # Loaded once at import time; reload by calling reload_access_lists()
 _allowed_users: set[int] = set()
 _allowed_groups: set[int] = set()
@@ -364,6 +386,7 @@ class AgentCore:
             and load_owner() is None
         ):
             save_owner(msg.user_id)
+            _set_heartbeat_chat(msg.chat_id)
             log.info("Ownership claimed by user %d (%s)", msg.user_id, msg.from_user)
             welcome = load_welcome_message()
             try:

@@ -896,12 +896,20 @@ async def heartbeat_loop(
             if not _chat_store:
                 continue
 
+            # Re-read HEARTBEAT_CHAT_ID each cycle — ownership claim may have set it
+            # after the loop started (spawned bots don't know the owner's chat at boot)
+            _dynamic_chat_id = int(os.environ.get("HEARTBEAT_CHAT_ID", "0"))
+            _effective_override = _dynamic_chat_id or override_chat_id
+
             # Find chats with activity since last heartbeat
-            if override_chat_id:
-                # Legacy mode: only check the configured chat
-                since = last_heartbeat_time.get(override_chat_id, time.time() - heartbeat_interval)
+            if _effective_override:
+                # Pinned mode: always fire for the configured chat, regardless of activity
+                since = last_heartbeat_time.get(_effective_override, time.time() - heartbeat_interval)
                 active = _chat_store.get_active_chats(since)
-                active = [c for c in active if c["chat_id"] == override_chat_id]
+                active = [c for c in active if c["chat_id"] == _effective_override]
+                if not active:
+                    # Chat is known but idle — still fire so the agent runs its autonomous cycle
+                    active = [{"chat_id": _effective_override, "msg_count": 0, "chat_title": "owner-DM"}]
             else:
                 # Auto-discover: check all chats with recent messages
                 global_since = time.time() - heartbeat_interval

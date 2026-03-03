@@ -82,8 +82,8 @@ Once installed, seed the vault structure the bot expects:
 ```bash
 mkdir -p /opt/knarr-vault/default/goals /opt/knarr-vault/default/scratch
 
-# Heartbeat protocol (agent can self-modify this)
-cp heartbeat.md /opt/knarr-vault/default/goals/heartbeat.md
+# Heartbeat protocol — copy from knarrbot root (agent can self-modify this copy)
+cp /path/to/knarrbot/heartbeat.md /opt/knarr-vault/default/goals/heartbeat.md
 
 # Starter goals (agent updates these every cycle)
 cat > /opt/knarr-vault/default/goals/active.md << 'EOF'
@@ -115,7 +115,7 @@ The vault also needs to be registered as a skill in your `knarr.toml`. See the [
 | `FALLBACK_API_KEY` | No | API key for the fallback provider |
 | `ALLOWED_USERS` | No | Comma-separated Telegram user IDs (empty = open access) |
 | `ALLOWED_GROUPS` | No | Comma-separated Telegram group chat IDs |
-| `HEARTBEAT_CHAT_ID` | No | Chat ID for proactive heartbeat messages |
+| `HEARTBEAT_CHAT_ID` | No | Chat ID for proactive heartbeat messages (auto-set when owner claims the bot) |
 | `HEARTBEAT_INTERVAL` | No | Seconds between heartbeat checks (default: 1800) |
 | `MAIL_POLL_INTERVAL` | No | Seconds between knarr-mail inbox checks (default: 10) |
 | `POSTMASTER_DB` | No | Path to postmaster SQLite DB for email polling |
