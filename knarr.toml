@@ -6,6 +6,21 @@ storage = "node.db"
 [network]
 bootstrap = ["bootstrap1.knarr.network:9000", "localhost:9200"]
 
+# ── Knowledge Vault ─────────────────────────────────────────────────────────
+# Uncomment after: git clone https://github.com/umpaka/vault /opt/knarr-skills/vault
+# See vault README for full setup. The symlink below handles knarr v0.34 sandboxing.
+#
+# Run once to create the symlink:
+#   ln -sfn /opt/knarr-skills/vault /opt/knarr/vault
+#
+# [skills.knowledge-vault]
+# handler = "vault/skills/knowledge_vault.py:handle"
+# description = "Private long-term memory for this agent. Read, write, search, list structured Markdown documents with YAML frontmatter."
+# tags = ["memory", "vault", "knowledge", "storage"]
+# price = 1
+# input_schema = {action = "string", path = "string", content = "string", vault = "string"}
+# output_schema = {result = "string", path = "string", vault = "string"}
+
 [skills.send-telegram]
 handler = "adapters/telegram/send_telegram.py:handle"
 description = "Send a message to a Telegram chat"
