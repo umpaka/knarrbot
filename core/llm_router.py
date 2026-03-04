@@ -2659,9 +2659,19 @@ class LLMRouter:
                 try:
                     result = await client.send_message(to_node, body, ttl_hours=ttl_hours)
                     status = result.get("status", "")
+
+                    if status == "queued":
+                        log.info("knarr-mail queued to %s: msg_id=%s", to_node[:16], result.get("message_id", "?"))
+                        return {
+                            "status": "queued",
+                            "delivered": True,
+                            "message_id": result.get("message_id"),
+                            "_hint": "Message queued for delivery. Tell the user in plain language, no IDs.",
+                        }
+
                     output = result.get("output_data", {})
 
-                    # v0.25.0+: API returns async job; poll for completion
+                    # Legacy path: async job polling (v0.25.0–v0.34.x)
                     if status == "accepted" and result.get("job_id"):
                         job_id = result["job_id"]
                         import asyncio as _asyncio
@@ -2689,7 +2699,7 @@ class LLMRouter:
                             "delivered": True,
                             "_hint": "Message sent successfully. Tell the user in plain language, no IDs.",
                         }
-                    else:
+                    elif status not in ("queued",):
                         err = result.get("error", {})
                         err_msg = err.get("message", "unknown error") if isinstance(err, dict) else str(err)
                         return {"error": f"Send failed: {err_msg}"}

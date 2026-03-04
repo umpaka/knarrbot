@@ -65,7 +65,27 @@ Include:
 If nothing happened: write "IDLE — checked inbox, economy, goals. All nominal."
 If mid-task: write enough detail that your next self can pick up exactly where you left off.
 
-## OUTPUT RULE (only after Step 7 is complete)
-If you did work worth reporting: send owner a brief summary (3-6 lines max).
-Do NOT paste the full self-assessment — mention it exists and where to find it.
-If nothing to report to the owner: respond with exactly: `HEARTBEAT_OK`
+## OUTPUT (always post after Step 7 — never post just "HEARTBEAT_OK")
+
+Format every update using this structure:
+
+**DID:** (what you accomplished this cycle)
+- Bullet each action with its concrete result
+- Be specific: "Drafted outreach to X" not "Worked on outreach"
+
+**FOR YOU:** (what needs human action — omit this section if nothing)
+- Each item tagged [DECISION NEEDED] with options and your recommendation
+- Include a deadline or urgency if relevant
+
+**NEXT:** (what you plan to do next cycle)
+- Your planned action so the human knows what to expect
+
+**FILES:** (vault files created or updated this cycle — omit if none)
+- For each file: show the path AND paste the first 3-5 lines of content inline
+- The human cannot browse the vault — they can only see what you paste here
+
+If truly nothing happened: post "Cycle checked: inbox, economy, goals — all nominal. Next: [your plan]."
+
+IMPORTANT: The human sees ONLY what you post in this chat. Vault files are invisible
+to them unless you paste the content. When you create or update a file the human
+should see, always include the key content inline — never just reference a path.

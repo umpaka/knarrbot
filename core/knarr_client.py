@@ -272,20 +272,14 @@ class KnarrClient:
     ) -> dict[str, Any]:
         """Send a knarr-mail message to another node.
 
-        Submits to the LOCAL node via ``POST /api/execute`` with skill
-        ``knarr-mail``.  The network handles delivery to the recipient.
+        Uses the dedicated ``POST /api/messages/send`` endpoint.
+        The network handles delivery to the recipient.
         """
-        return await self.execute(
-            skill="knarr-mail",
-            input_data={
-                "action": "send",
-                "to": to_node,
-                "body": body,
-                "ttl_hours": ttl_hours,
-            },
-            local=True,
-            timeout=30,
-        )
+        return await self._post("/api/messages/send", json_data={
+            "to": to_node,
+            "body": body,
+            "ttl_hours": ttl_hours,
+        })
 
     # ── Assets ────────────────────────────────────────────────────
 

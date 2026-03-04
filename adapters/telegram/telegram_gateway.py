@@ -1455,13 +1455,15 @@ async def mail_poll_loop(
                     )
 
                     try:
+                        from agent_core import load_owner as _load_owner_t
+                        _owner_t = _load_owner_t() or 0
                         agent_msg = InboundMessage(
                             channel="knarr-mail",
                             chat_id=target_chat,
                             text=prompt,
                             from_user="thrall",
                             display_name=f"thrall ({brief_node}...)",
-                            user_id=0,
+                            user_id=_owner_t,
                             chat_title="knarr-mail",
                             is_group=False,
                         )
@@ -1630,13 +1632,15 @@ async def mail_poll_loop(
 
                 # Route through the agent with a typing indicator
                 try:
+                    from agent_core import load_owner as _load_owner_m
+                    _owner_m = _load_owner_m() or 0
                     agent_msg = InboundMessage(
                         channel="knarr-mail",
                         chat_id=target_chat,
                         text=prompt,
                         from_user="knarr-mail",
                         display_name=f"knarr-mail ({sender_short}...)",
-                        user_id=0,
+                        user_id=_owner_m,
                         chat_title="knarr-mail",
                         is_group=False,
                     )
@@ -1772,13 +1776,15 @@ async def email_poll_loop(
                 prompt = "\n".join(prompt_lines)
 
                 try:
+                    from agent_core import load_owner as _load_owner
+                    _owner_id = _load_owner() or 0
                     agent_msg = InboundMessage(
                         channel="postmaster",
                         chat_id=target_chat,
                         text=prompt,
                         from_user="postmaster",
                         display_name=f"Email from {from_addr}",
-                        user_id=0,
+                        user_id=_owner_id,
                         chat_title="postmaster",
                         is_group=False,
                     )

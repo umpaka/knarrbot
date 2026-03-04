@@ -116,11 +116,10 @@ def save_owner(user_id: int):
 
 
 def _set_heartbeat_chat(chat_id: int) -> None:
-    """Pin the heartbeat to the owner's DM chat.
+    """Pin the heartbeat/cron output to the given chat.
 
     Sets HEARTBEAT_CHAT_ID in the live process env so background loops
-    pick it up immediately, and appends it to .env so it survives restarts.
-    Called once when ownership is claimed.
+    pick it up immediately, and persists it to .env so it survives restarts.
     """
     os.environ["HEARTBEAT_CHAT_ID"] = str(chat_id)
     env_path = os.path.join(_DATA_DIR, ".env")
@@ -132,9 +131,35 @@ def _set_heartbeat_chat(chat_id: int) -> None:
         lines.append(f"HEARTBEAT_CHAT_ID={chat_id}\n")
         with open(env_path, "w") as f:
             f.writelines(lines)
-        log.info("Heartbeat pinned to owner DM chat %d", chat_id)
+        log.info("Heartbeat pinned to chat %d", chat_id)
     except Exception:
         log.exception("Failed to persist HEARTBEAT_CHAT_ID to .env (live env still set)")
+
+
+def _add_allowed_group(chat_id: int) -> None:
+    """Add a group chat_id to ALLOWED_GROUPS in the live env and .env file."""
+    existing = os.environ.get("ALLOWED_GROUPS", "")
+    current_ids = {s.strip() for s in existing.split(",") if s.strip()}
+    cid = str(chat_id)
+    if cid in current_ids:
+        return
+    current_ids.add(cid)
+    new_val = ",".join(sorted(current_ids))
+    os.environ["ALLOWED_GROUPS"] = new_val
+
+    env_path = os.path.join(_DATA_DIR, ".env")
+    try:
+        lines: list[str] = []
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                lines = [l for l in f.readlines() if not l.startswith("ALLOWED_GROUPS=")]
+        lines.append(f"ALLOWED_GROUPS={new_val}\n")
+        with open(env_path, "w") as f:
+            f.writelines(lines)
+        log.info("Added group %d to ALLOWED_GROUPS", chat_id)
+    except Exception:
+        log.exception("Failed to persist ALLOWED_GROUPS to .env")
+    reload_access_lists()
 
 
 # Loaded once at import time; reload by calling reload_access_lists()
@@ -438,6 +463,8 @@ class AgentCore:
             await self._cmd_unpair(msg, args)
         elif cmd == "/skills":
             await self._cmd_skills(msg)
+        elif cmd == "/setchannel":
+            await self._cmd_setchannel(msg)
         elif cmd == "/run":
             await self._cmd_run(msg, args)
         elif cmd:
@@ -481,6 +508,7 @@ class AgentCore:
             "  /reset all — Clear history + wipe memories\n"
             "  /status — Node info and uptime\n"
             "  /doctor — Diagnose services, API keys, and health\n"
+            "  /setchannel — Pin heartbeat & cron output to this chat (owner only)\n"
             "  /pair — Generate a pairing code (admin only)\n"
             "  /unpair `<user_id>` — Revoke a paired user (admin only)\n"
             "  /help — Show this message\n\n"
@@ -700,6 +728,25 @@ class AgentCore:
             lines.append("\n*Knarr:* version unknown")
 
         await self.send(msg.chat_id, "\n".join(lines), "Markdown")
+
+    async def _cmd_setchannel(self, msg: InboundMessage):
+        """Pin heartbeat and cron output to the current chat."""
+        owner = load_owner()
+        if owner and msg.user_id != owner:
+            await self.send(msg.chat_id, "Only the owner can change the heartbeat channel.")
+            return
+
+        _set_heartbeat_chat(msg.chat_id)
+
+        if msg.is_group:
+            _add_allowed_group(msg.chat_id)
+
+        label = f"group *{msg.chat_title}*" if msg.is_group else "this DM"
+        await self.send(
+            msg.chat_id,
+            f"Heartbeat and cron output pinned to {label} (`{msg.chat_id}`).",
+            "Markdown",
+        )
 
     async def _cmd_pair(self, msg: InboundMessage):
         """Generate a pairing code so an unknown user can gain access."""
