@@ -2387,9 +2387,16 @@ class LLMRouter:
         # --- Local tools ---
         if func_name == "create_scheduled_task" and self.cron_store:
             try:
+                task_name = args.get("name", "unnamed")
+                existing = self.cron_store.get_jobs(chat_id)
+                for ej in existing:
+                    if ej.get("name", "").lower().strip() == task_name.lower().strip():
+                        log.info("Skipped duplicate scheduled task: %s (existing id=%s)", task_name, ej.get("id"))
+                        return {"status": "already_exists", "job_id": ej["id"],
+                                "message": f"Task '{task_name}' already exists (id={ej['id']}). Use delete_scheduled_task first to replace it."}
                 job_id = self.cron_store.add_job(
                     chat_id=chat_id,
-                    name=args.get("name", "unnamed"),
+                    name=task_name,
                     message=args.get("message", ""),
                     schedule_type=args.get("schedule_type", "once"),
                     schedule_value=str(args.get("schedule_value", "60")),

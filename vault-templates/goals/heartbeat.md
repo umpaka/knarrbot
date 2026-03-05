@@ -65,27 +65,31 @@ Include:
 If nothing happened: write "IDLE — checked inbox, economy, goals. All nominal."
 If mid-task: write enough detail that your next self can pick up exactly where you left off.
 
-## OUTPUT (always post after Step 7 — never post just "HEARTBEAT_OK")
+## VERIFY-BEFORE-REPORT RULE
 
-Format every update using this structure:
+Before reporting ANY system status (cockpit down, skills broken, economy issue),
+RE-CHECK IT RIGHT NOW using the actual API or tool. Never carry forward an
+observation from a previous cycle without re-verifying. Stale observations
+become false reports.
 
-**DID:** (what you accomplished this cycle)
-- Bullet each action with its concrete result
-- Be specific: "Drafted outreach to X" not "Worked on outreach"
+## OUTPUT RULES
 
-**FOR YOU:** (what needs human action — omit this section if nothing)
-- Each item tagged [DECISION NEEDED] with options and your recommendation
-- Include a deadline or urgency if relevant
+**Only report what is NEW since your last update.** Do not repeat information
+the human has already seen. If you drafted outreach last cycle and nothing
+changed, don't mention it again. The human reads every message — repeating
+yourself wastes their attention.
 
-**NEXT:** (what you plan to do next cycle)
-- Your planned action so the human knows what to expect
+**If you did meaningful NEW work this cycle**, post a short update:
 
-**FILES:** (vault files created or updated this cycle — omit if none)
-- For each file: show the path AND paste the first 3-5 lines of content inline
-- The human cannot browse the vault — they can only see what you paste here
+**DID:** 1-3 bullets of concrete NEW actions and results
+**FOR YOU:** anything needing human action (omit if nothing)
+**NEXT:** one sentence — what you plan to do next
 
-If truly nothing happened: post "Cycle checked: inbox, economy, goals — all nominal. Next: [your plan]."
+Only include **FILES:** if you created or updated a vault file THIS cycle.
+When you do, paste the first 3-5 lines inline — the human can't browse the vault.
 
-IMPORTANT: The human sees ONLY what you post in this chat. Vault files are invisible
-to them unless you paste the content. When you create or update a file the human
-should see, always include the key content inline — never just reference a path.
+**If nothing new happened**, post exactly this and nothing more:
+`Cycle nominal. Next: [one sentence plan].`
+
+**Keep it short.** A good heartbeat update is 3-8 lines. If yours is longer
+than 10 lines, you are probably repeating yourself. Cut ruthlessly.

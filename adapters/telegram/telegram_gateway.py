@@ -801,9 +801,6 @@ async def heartbeat_loop(
     _vault_root = os.environ.get("VAULT_ROOT", "/opt/knarr-vault")
     # Vault-backed heartbeat instructions — agent can overwrite this via knowledge_vault skill
     _vault_heartbeat_path = os.path.join(_vault_root, "default", "goals", "heartbeat.md")
-    # Vault-backed interval control — agent writes next_interval: N here to adjust its wake cycle
-    _vault_control_path = os.path.join(_vault_root, "default", "goals", "heartbeat-control.md")
-
     log.info(
         "Starting heartbeat loop (interval=%ds, static=%s, vault=%s, override_chat=%s)",
         heartbeat_interval, _static_heartbeat_path, _vault_heartbeat_path,
@@ -814,39 +811,10 @@ async def heartbeat_loop(
     last_heartbeat_time: dict[int, float] = {}
     # Track last health alert to avoid spamming (only alert once per issue)
     _last_health_issues: set[str] = set()
-    # Current sleep duration — can be overridden per-cycle by agent
-    _current_interval = heartbeat_interval
 
     while True:
         try:
-            await asyncio.sleep(_current_interval)
-
-            # ── Dynamic interval: agent can adjust next sleep via vault ──
-            _next_interval = heartbeat_interval  # reset to default each cycle
-            try:
-                if os.path.exists(_vault_control_path):
-                    import re as _re
-                    with open(_vault_control_path) as _cf:
-                        _ctrl = _cf.read()
-                    _m = _re.search(r'next_interval:\s*(\d+)', _ctrl)
-                    if _m:
-                        _raw = int(_m.group(1))
-                        # Clamp: minimum 60s, maximum 4h
-                        _next_interval = max(60, min(14400, _raw))
-                        log.info(
-                            "heartbeat: agent set next interval to %ds (requested %ds)",
-                            _next_interval, _raw,
-                        )
-                    # One-shot: delete after reading so it doesn't persist forever
-                    _keep = _re.search(r'persist:\s*true', _ctrl)
-                    if not _keep:
-                        try:
-                            os.remove(_vault_control_path)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            _current_interval = _next_interval
+            await asyncio.sleep(heartbeat_interval)
 
             # ── Health check (runs every tick, no LLM tokens) ──
             if knarr_client and send_fn:
